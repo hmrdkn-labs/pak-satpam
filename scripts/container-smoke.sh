@@ -3,10 +3,12 @@ set -euo pipefail
 
 image="${1:-observability-agent-mcp:local}"
 name="observability-agent-mcp-smoke-$$"
+volume="observability-agent-mcp-smoke-runtime-$$"
 temporary="$(mktemp -d)"
 
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
+  docker volume rm -f "$volume" >/dev/null 2>&1 || true
   rm -rf "$temporary"
 }
 trap cleanup EXIT
@@ -37,17 +39,22 @@ printf '%s\n' 'grafana-container-smoke-token' >"$temporary/grafana-token"
 printf '%s\n' 'mcp-container-smoke-token-123' >"$temporary/mcp-token"
 chmod 600 "$temporary"/*
 
+docker volume create "$volume" >/dev/null
+docker run --rm --user 0:0 \
+  --volume "$temporary:/source:ro" \
+  --volume "$volume:/target" \
+  --entrypoint sh \
+  "$image" -c 'cp /source/provider-config.yml /source/grafana-token /source/mcp-token /target/ && chmod 600 /target/* && chown 1000:1000 /target/*'
+
 docker run -d --name "$name" \
   --publish 127.0.0.1::8765 \
   --env MCP_HTTP_HOST=0.0.0.0 \
   --env MCP_HTTP_PORT=8765 \
   --env MCP_HTTP_ALLOWED_HOSTS=127.0.0.1 \
-  --env OBSERVABILITY_PROVIDER_CONFIG=/run/config/provider-config.yml \
-  --env GRAFANA_TOKEN_FILE=/run/secrets/grafana-token \
-  --env MCP_TOKEN_FILE=/run/secrets/mcp-token \
-  --volume "$temporary/provider-config.yml:/run/config/provider-config.yml:ro" \
-  --volume "$temporary/grafana-token:/run/secrets/grafana-token:ro" \
-  --volume "$temporary/mcp-token:/run/secrets/mcp-token:ro" \
+  --env OBSERVABILITY_PROVIDER_CONFIG=/run/runtime/provider-config.yml \
+  --env GRAFANA_TOKEN_FILE=/run/runtime/grafana-token \
+  --env MCP_TOKEN_FILE=/run/runtime/mcp-token \
+  --volume "$volume:/run/runtime:ro" \
   "$image" dist/http-cli.js >/dev/null
 
 binding="$(docker port "$name" 8765/tcp | head -n 1)"
