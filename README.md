@@ -83,7 +83,19 @@ The server can be consumed through:
 
 The implemented HTTP mode uses a file-injected Bearer credential and a strict
 Host allowlist for a private, single-operator deployment. It is not a public or
-multi-tenant OAuth deployment. No package or image has been published yet.
+multi-tenant OAuth deployment.
+
+The public multi-architecture image is published for `linux/amd64` and
+`linux/arm64` at:
+
+```text
+ghcr.io/hamardikan/observability-agent-mcp
+```
+
+Production deployments should consume an immutable `@sha256:` digest from the
+GitHub Actions publisher, not a mutable tag. Runtime policy, credentials, and
+network exposure remain deployment-owned and are intentionally excluded from
+the image.
 
 Remote HTTP deployment requires authentication. Publishing this repository does
 not imply that an MCP endpoint should be exposed without OAuth, network policy,

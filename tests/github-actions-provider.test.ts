@@ -259,4 +259,20 @@ describe("GitHub Actions adapter", () => {
       expect.objectContaining({ method: "POST", redirect: "error" }),
     );
   });
+
+  it("maps a failed rerun without exposing the provider response", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      new Response("provider-secret-must-not-surface", { status: 500 }),
+    );
+    await expect(provider(fetch).rerunFailedWorkflow({
+      repo: "owner/repo",
+      workflow: "goal14-controlled-fixture.yml",
+      runId: "101",
+    })).rejects.toMatchObject({ code: "unavailable" });
+    await expect(provider(fetch).rerunFailedWorkflow({
+      repo: "owner/repo",
+      workflow: "goal14-controlled-fixture.yml",
+      runId: "101",
+    })).rejects.not.toThrow("secret");
+  });
 });
