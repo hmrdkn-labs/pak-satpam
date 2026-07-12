@@ -1,6 +1,6 @@
 # Implementation Status
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 ## Goal 14: CI/CD Analysis And Gated Rerun
 
@@ -13,8 +13,10 @@ Implemented locally:
   installation auth, atomic replay protection, and metadata-only audit events.
 - An operator-only approval CLI and controlled first-attempt failure workflow.
 
-Live edge deployment and controlled Discord evidence remain private-infra
-responsibilities and are not implied by this public repository state.
+The public multi-architecture OCI image is published at
+`ghcr.io/hamardikan/observability-agent-mcp`; production uses the immutable
+digest recorded by the private infra evidence. Live edge deployment and
+controlled Discord evidence remain private-infra responsibilities.
 
 ## Goal 11: Private Provider Shadow
 
@@ -34,7 +36,8 @@ Implemented:
 
 Verified private-shadow behavior:
 
-- Seven tools discovered by the edge agent client as read-only.
+- Seven observability tools discovered by the edge agent client as read-only,
+  plus four read-only CI tools and one approval-gated failed-job rerun.
 - Metrics series and active-alert counts match direct provider counts.
 - Grafana renderer absence returns structured unknown/unavailable evidence.
 - Deployment, network placement, and secrets remain owned by the private infra repo.
@@ -44,9 +47,12 @@ Current boundaries:
 - No public endpoint or OAuth authorization-server integration.
 - No shell, source write, deployment, alert mutation, or dashboard mutation tools.
 - No logs or traces until the metrics contract is stable.
-- No npm or OCI release has been published.
+- The OCI release is published through the main-only multi-architecture GitHub
+  Actions workflow; package visibility is public while runtime credentials and
+  deployment policy remain private.
 
 Verification command: `npm run validate`
 
-Next checkpoint: complete public compatibility, OAuth, concurrency, provenance,
-and release gates without weakening the read-only contract.
+Next checkpoint: preserve the read-only contract while adding only capability
+that is justified by observed operator pain; do not infer a need for OAuth or
+broader deployment authority from the public package release.
