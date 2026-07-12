@@ -207,6 +207,26 @@ describe("GitHub Actions adapter", () => {
     })).rejects.toMatchObject({ code: "permission" });
   });
 
+  it("accepts GitHub Actions signed Azure log storage without forwarding authorization", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(null, {
+        status: 302,
+        headers: { location: "https://productionresultssa13.blob.core.windows.net/actions-results/job.txt?sig=synthetic" },
+      }))
+      .mockResolvedValueOnce(new Response("test failed\n", {
+        headers: { "content-type": "text/plain" },
+      }));
+    const result = await provider(fetch).getLogEvidence({
+      repo: "owner/repo",
+      workflow: "goal14-controlled-fixture.yml",
+      runId: "101",
+      jobId: "9",
+      maxLines: 10,
+    });
+    expect(result.data.available).toBe(true);
+    expect(fetch.mock.calls.at(-1)?.[1]).not.toHaveProperty("headers");
+  });
+
   it("maps malformed, unavailable, and permission responses without echoing bodies", async () => {
     for (const response of [
       new Response("upstream-secret", { status: 500 }),

@@ -126,7 +126,7 @@ export class GitHubActionsProvider implements CIProvider {
     if (location === null) throw new CIProviderError("malformed");
     let target: URL;
     try { target = new URL(location); } catch { throw new CIProviderError("malformed"); }
-    if (target.protocol !== "https:" || !isGitHubActionsLogHost(target.hostname)) {
+    if (target.protocol !== "https:" || target.port !== "" || target.username !== "" || target.password !== "" || !isGitHubActionsLogHost(target.hostname)) {
       throw new CIProviderError("permission");
     }
     return this.#fetch(target, {
@@ -155,7 +155,9 @@ export class GitHubActionsProvider implements CIProvider {
 function isRedirect(status: number): boolean { return status >= 300 && status < 400; }
 function isGitHubActionsLogHost(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/\.$/, "");
-  return normalized === "pipelines.actions.githubusercontent.com";
+  return normalized === "pipelines.actions.githubusercontent.com"
+    || normalized === "results-receiver.actions.githubusercontent.com"
+    || normalized.endsWith(".blob.core.windows.net");
 }
 function trustedGitHubApiBase(value: string | undefined): string {
   const url = new URL(value ?? "https://api.github.com");

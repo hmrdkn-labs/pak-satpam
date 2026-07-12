@@ -10,9 +10,10 @@ jobs:
   controlled-failure:
     runs-on: ubuntu-latest
     steps:
-      - name: Fail only on the first run attempt
+      - name: Controlled test failure on the first run attempt
         run: |
           if [ "${{ github.run_attempt }}" -eq 1 ]; then
+            echo "Authorization: Bearer synthetic-goal14-credential-123456"
             echo "controlled fixture fails on the initial attempt"
             exit 1
           fi
