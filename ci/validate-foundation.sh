@@ -42,6 +42,7 @@ required=(
   scripts/assert-tool-surface.mjs
   scripts/http-smoke.mjs
   scripts/package-smoke.mjs
+  ci/build-multiarch.sh
 )
 
 for path in "${required[@]}"; do

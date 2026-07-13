@@ -4,6 +4,11 @@ This public runbook is a bounded reference for the optional GitHub Actions
 tools. It contains recommendations only. It does not grant provider access,
 read secrets, modify source, dispatch workflows, or deploy systems.
 
+The reusable event-loop and release handoff contract is documented in
+[CI/CD Integration Contract](ci-cd-integration-contract.md). This runbook
+describes bounded evidence and operator decisions; it does not make the loop
+autonomous.
+
 ## Common Rules
 
 - Confirm the repository and workflow are in the operator allowlist.

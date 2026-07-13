@@ -1,6 +1,25 @@
 # Implementation Status
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
+
+## Goal 18 Foundation: Portable Release And CI/CD Contract
+
+Implemented:
+
+- Portability contract for npm, stdio, private Streamable HTTP, and non-root
+  OCI execution on `linux/amd64` and `linux/arm64`.
+- Reusable CI/CD integration contract that keeps Pak Satpam as the evidence and
+  approval boundary while a separate caller owns polling and delivery state.
+- Non-publishing Buildx validation for both target architectures in the public
+  repository validation workflow.
+- Publish workflow preflight now runs the TypeScript typecheck before producing
+  the existing immutable multi-architecture GHCR artifact.
+
+Not yet live:
+
+- The private edge CI event observer and Hermes route extension remain behind
+  the Goal 18 live-apply approval boundary. The current Hermes route is
+  incident-only, and changing it may restart the production gateway.
 
 ## Goal 14: CI/CD Analysis And Gated Rerun
 

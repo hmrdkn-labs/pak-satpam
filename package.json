@@ -58,6 +58,7 @@
     "validate": "npm run typecheck && npm test && npm run build && npm run test:stdio && npm run inspector:list && npm run package:smoke && npm run audit && ./ci/validate-foundation.sh",
     "start": "node dist/cli.js",
     "container:build": "docker build --file Containerfile --tag observability-agent-mcp:local .",
+    "container:build:multiarch": "./ci/build-multiarch.sh",
     "container:smoke": "bash scripts/container-smoke.sh observability-agent-mcp:local"
   },
   "dependencies": {
