@@ -14,7 +14,7 @@ const runtime = loadRuntimeConfiguration({
   configPath: requiredEnvironment("OBSERVABILITY_PROVIDER_CONFIG"),
   grafanaTokenPath: requiredEnvironment("GRAFANA_TOKEN_FILE"),
   mcpTokenPath: requiredEnvironment("MCP_TOKEN_FILE"),
-  fetch: globalThis.fetch,
+  fetch: globalThis.fetch.bind(globalThis),
 });
 const app = createObservabilityHttpApp({
   provider: runtime.provider,
