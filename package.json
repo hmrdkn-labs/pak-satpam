@@ -26,12 +26,17 @@
       "types": "./dist/ci/index.d.ts",
       "import": "./dist/ci/index.js"
     },
+    "./observer": {
+      "types": "./dist/observer/index.d.ts",
+      "import": "./dist/observer/index.js"
+    },
     "./package.json": "./package.json"
   },
   "license": "Apache-2.0",
   "private": false,
   "bin": {
     "observability-agent-mcp": "dist/cli.js",
+    "observability-agent-mcp-observer": "dist/observer/cli.js",
     "observability-agent-mcp-approval": "dist/approval-cli.js",
     "observability-agent-mcp-approve": "dist/approval-cli.js"
   },

@@ -57,6 +57,38 @@ describe("CI approval and redaction controls", () => {
     expect(audit.events.every((event) => !JSON.stringify(event).includes("a".repeat(32)))).toBe(true);
   });
 
+  it("rejects a mismatched run attempt before consuming the approval", () => {
+    const audit = new InMemoryApprovalAuditStore();
+    const service = new ApprovalTokenService({
+      key: Buffer.from("c".repeat(32)),
+      clock: () => new Date("2026-07-10T00:00:00.000Z"),
+      audit,
+    });
+    const token = service.issue({ ...BINDING, ttlSeconds: 60 });
+
+    expect(service.verifyAndConsume(token, { ...BINDING, runAttempt: 2 })).toMatchObject({
+      ok: false,
+      code: "binding",
+    });
+    expect(service.verifyAndConsume(token, BINDING)).toMatchObject({ ok: true });
+  });
+
+  it("rejects a mismatched head SHA before consuming the approval", () => {
+    const audit = new InMemoryApprovalAuditStore();
+    const service = new ApprovalTokenService({
+      key: Buffer.from("d".repeat(32)),
+      clock: () => new Date("2026-07-10T00:00:00.000Z"),
+      audit,
+    });
+    const token = service.issue({ ...BINDING, ttlSeconds: 60 });
+
+    expect(service.verifyAndConsume(token, { ...BINDING, headSha: "b".repeat(40) })).toMatchObject({
+      ok: false,
+      code: "binding",
+    });
+    expect(service.verifyAndConsume(token, BINDING)).toMatchObject({ ok: true });
+  });
+
   it("rejects duplicate requests, expired tokens, oversized TTL, and bad key files", () => {
     const audit = new InMemoryApprovalAuditStore();
     let now = new Date("2026-07-10T00:00:00.000Z");

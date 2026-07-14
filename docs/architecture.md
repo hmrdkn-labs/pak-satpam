@@ -69,9 +69,17 @@ state, and metadata-only audit events. GitHub App authentication is an adapter;
 the domain does not depend on GitHub response shapes. The rerun port exposes
 only `rerun-failed-jobs` and cannot dispatch, cancel, deploy, or write source.
 
+### CI Observer Companion
+
+The optional observer is a separate process packaged with the same npm and OCI
+artifacts. It polls exact repository/workflow allowlists through the CI adapter,
+persists only private metadata-only cursor/lease/dedupe state, and hands signed
+events to an operator-configured internal agent route. It never hosts MCP,
+owns chat delivery, or invokes the approval-gated rerun operation.
+
 ## Non-Responsibilities
 
-- Webhook/event ingestion.
+- Public webhook/event ingestion.
 - Discord or other chat gateways.
 - LLM selection or prompting.
 - CI/CD mutations other than the optional approved failed-job rerun.
@@ -79,7 +87,9 @@ only `rerun-failed-jobs` and cannot dispatch, cancel, deploy, or write source.
 - Infrastructure mutation.
 - Secret management products.
 
-Those concerns belong to the client agent or deployment environment.
+Chat delivery, LLM prompting, credentials, network placement, and deployment
+remain owned by the client agent or deployment environment. The optional
+observer owns only bounded polling and signed internal event handoff.
 
 ## Technology Direction
 

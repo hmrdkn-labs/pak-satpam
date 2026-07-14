@@ -10,6 +10,7 @@ required=(
   docs/security-model.md
   docs/tool-surface.md
   docs/client-compatibility.md
+  docs/ci-observer.md
   docs/test-strategy.md
   docs/roadmap.md
   docs/decisions/0001-product-boundary.md
@@ -37,6 +38,12 @@ required=(
   src/providers/grafana-visual-provider.ts
   src/providers/victoriametrics-provider.ts
   src/runtime/load-runtime-configuration.ts
+  src/observer/cli.ts
+  src/observer/config.ts
+  src/observer/delivery.ts
+  src/observer/runtime.ts
+  src/observer/state.ts
+  src/providers/mapped-github-app-token-provider.ts
   src/visuals/synthetic-renderer.ts
   scripts/container-smoke.sh
   scripts/assert-tool-surface.mjs

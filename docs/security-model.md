@@ -148,6 +148,23 @@ There are no write scopes in version 1.
 - The action rechecks fresh failed/cancelled state before calling exactly
   `rerun-failed-jobs`.
 
+## CI Observer Boundary
+
+- Repository and workflow allowlists are exact configuration, never event input.
+- The observer polls terminal runs with bounded pages and reports truncation as
+  degraded health instead of silently advancing past an incomplete window.
+- Durable state contains only target keys, run IDs, attempts, outcome classes,
+  delivery state, and timestamps; secret material and provider payloads are not
+  persisted.
+- Internal delivery uses an HMAC over `timestamp.body`, a deterministic request
+  ID, bounded retries, redirect rejection, and a Tailscale-literal or explicitly
+  trusted destination.
+- Success delivery does not invoke failure analysis. Failure delivery includes
+  only bounded metadata, redaction status, digests, categories, and runbook
+  references. It never carries raw log lines.
+- The observer has no rerun, source-write, deploy, shell, secret-read, browser,
+  or chat-gateway authority.
+
 ## Explicitly Forbidden
 
 - Generic shell or command tools.

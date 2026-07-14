@@ -8,7 +8,7 @@ Pak Satpam gives an AI agent the evidence it needs to understand infrastructure
 health, investigate incidents, inspect CI failures, and show Grafana visuals
 without handing the model a shell or unrestricted infrastructure access.
 
-[![Validate](https://github.com/hamardikan/pak-satpam/actions/workflows/validate.yml/badge.svg)](https://github.com/hamardikan/pak-satpam/actions/workflows/validate.yml)
+[![Validate](https://github.com/hmrdkn-labs/pak-satpam/actions/workflows/validate.yml/badge.svg)](https://github.com/hmrdkn-labs/pak-satpam/actions/workflows/validate.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2f6f4e.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-43853d.svg)](package.json)
 [![MCP](https://img.shields.io/badge/protocol-MCP-111827.svg)](https://modelcontextprotocol.io/)
@@ -82,6 +82,24 @@ workflow allowlists, a GitHub App identity, a replay-safe approval key, and
 metadata-only audit storage. The public
 `.github/workflows/goal14-controlled-fixture.yml` workflow provides a bounded
 failure-and-rerun test. See the [CI/CD runbook](docs/ci-cd-runbook.md).
+
+### CI observer (optional)
+
+The package and OCI image also include `observability-agent-mcp-observer`. It
+polls only configured GitHub Actions workflow allowlists, stores private
+metadata-only cursor and dedupe state, and sends signed success or failure
+events to operator-controlled internal routes. It does not add MCP tools and
+cannot rerun workflows, modify source, deploy, or own a chat gateway.
+
+Run it only in a private deployment with file-injected GitHub App and HMAC
+credentials:
+
+```bash
+OBSERVER_CONFIG_FILE=/run/runtime/observer.yml \
+  observability-agent-mcp-observer
+```
+
+See the [CI observer deployment contract](docs/ci-observer.md).
 
 ## Run It
 
@@ -183,6 +201,7 @@ runtime configuration. Private topology and secrets do not belong here.
 - [Client compatibility](docs/client-compatibility.md)
 - [Portability and release contract](docs/portability.md)
 - [CI/CD integration contract](docs/ci-cd-integration-contract.md)
+- [CI observer deployment contract](docs/ci-observer.md)
 - [Goal prompt: CI event loop and portable release](docs/goals/goal-ci-event-loop-portable-release.md)
 - [Test strategy](docs/test-strategy.md)
 - [Implementation status](docs/implementation-status.md)

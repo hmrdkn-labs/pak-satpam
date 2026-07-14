@@ -12,10 +12,11 @@ import {
   type CILogEvidenceInput,
   type CILogEvidenceResult,
   type CIRerunFailedWorkflowResult,
+  type CIWorkflowRun,
   type CIWorkflowStatusInput,
   type CIWorkflowStatusResult,
 } from "../domain/ci-schemas.js";
-import { CIProviderError, type CIProvider, type CITokenProvider } from "./ci-provider.js";
+import { CIProviderError, type CIProvider, type CITokenProvider, type CIWorkflowRunListInput, type CIWorkflowRunListResult } from "./ci-provider.js";
 import { StaticGitHubTokenProvider } from "./github-app-token-provider.js";
 import { redactText } from "../ci/redaction.js";
 
@@ -55,6 +56,26 @@ export class GitHubActionsProvider implements CIProvider {
     const rawRun = input.runId === undefined ? firstRun(value) : value;
     const run = normalizeRun(rawRun, input.repo, input.workflow);
     return CIWorkflowStatusResultSchema.parse(makeCIEvidence("github-actions", this.#clock(), { run }, { freshness: freshness(run.updatedAt, this.#clock, this.#maxFreshnessMs) }));
+  }
+
+  async listWorkflowRuns(input: CIWorkflowRunListInput): Promise<CIWorkflowRunListResult> {
+    if (!Number.isInteger(input.page) || input.page < 1 || !Number.isInteger(input.perPage) || input.perPage < 1 || input.perPage > 100) {
+      throw new CIProviderError("malformed");
+    }
+    const params = new URLSearchParams({ per_page: String(input.perPage), page: String(input.page), status: "completed" });
+    if (input.createdAfter !== undefined) {
+      const createdAfter = new Date(input.createdAfter);
+      if (Number.isNaN(createdAfter.getTime())) throw new CIProviderError("malformed");
+      params.set("created", `>=${createdAfter.toISOString()}`);
+    }
+    const value = await this.getJson(`/repos/${input.repo}/actions/workflows/${encode(input.workflow)}/runs?${params.toString()}`, input.repo);
+    const rawRuns = arrayField(value, "workflow_runs");
+    const runs = rawRuns.map((raw) => normalizeRun(raw, input.repo, input.workflow));
+    return {
+      runs,
+      hasMore: rawRuns.length >= input.perPage,
+      ...(rawRuns.length >= input.perPage ? { nextPage: input.page + 1 } : {}),
+    };
   }
 
   async getFailedJobAnalysis(input: CIFailedJobAnalysisInput): Promise<CIFailedJobAnalysisResult> {
@@ -182,7 +203,7 @@ function stringField(value: Record<string, unknown>, key: string): string {
   if (typeof value[key] !== "string" || value[key].length === 0) throw new CIProviderError("malformed");
   return value[key];
 }
-function normalizeRun(value: unknown, repository: string, workflow: string) {
+function normalizeRun(value: unknown, repository: string, workflow: string): CIWorkflowRun {
   const raw = record(value);
   const id = typeof raw.id === "number" || typeof raw.id === "string" ? String(raw.id) : "";
   const status = raw.status;
@@ -193,7 +214,19 @@ function normalizeRun(value: unknown, repository: string, workflow: string) {
   const runAttempt = raw.run_attempt;
   const sha = stringField(raw, "head_sha").toLowerCase();
   if (typeof runAttempt !== "number" || !Number.isInteger(runAttempt) || runAttempt < 1 || !/^[a-f0-9]{40}$/.test(sha) || Number.isNaN(createdAt.getTime()) || Number.isNaN(updatedAt.getTime())) throw new CIProviderError("malformed");
-  return { id, repository, workflow, status, conclusion, runAttempt, event: stringField(raw, "event"), ref: stringField(raw, "head_branch"), sha, createdAt: createdAt.toISOString(), updatedAt: updatedAt.toISOString() };
+  return {
+    id,
+    repository,
+    workflow,
+    status: status as CIWorkflowRun["status"],
+    conclusion: conclusion as CIWorkflowRun["conclusion"],
+    runAttempt,
+    event: stringField(raw, "event"),
+    ref: stringField(raw, "head_branch"),
+    sha,
+    createdAt: createdAt.toISOString(),
+    updatedAt: updatedAt.toISOString(),
+  };
 }
 function normalizeJob(value: unknown) {
   const raw = record(value);

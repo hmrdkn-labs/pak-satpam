@@ -222,7 +222,7 @@ export class ApprovalTokenService {
     const expectedBuffer = Buffer.from(expected);
     const suppliedBuffer = Buffer.from(suppliedSignature);
     if (expectedBuffer.length !== suppliedBuffer.length || !timingSafeEqual(expectedBuffer, suppliedBuffer)) return { ok: false, code: "signature" };
-    if (payload.repo !== binding.repo || payload.workflow !== binding.workflow || payload.runId !== binding.runId || payload.requestId !== binding.requestId) return { ok: false, code: "binding" };
+    if (payload.repo !== binding.repo || payload.workflow !== binding.workflow || payload.runId !== binding.runId || payload.runAttempt !== binding.runAttempt || payload.headSha !== binding.headSha || payload.requestId !== binding.requestId) return { ok: false, code: "binding" };
     const now = Math.floor(this.#clock().getTime() / 1_000);
     if (payload.expiresAt <= now || payload.expiresAt - payload.issuedAt > MAX_APPROVAL_TTL_SECONDS || payload.issuedAt > now + 1) return { ok: false, code: "expired" };
     return this.#audit.consumeApproval({ ...binding, nonce: payload.nonce, outcome: "consumed", at: this.#clock().toISOString() });

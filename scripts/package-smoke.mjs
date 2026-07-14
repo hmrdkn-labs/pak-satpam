@@ -34,9 +34,12 @@ try {
   const module = await import(pathToFileURL(join(installedRoot, "dist", "index.js")).href);
   assert.equal(typeof module.createObservabilityServer, "function");
   assert(readFileSync(join(installedRoot, "dist", "index.d.ts"), "utf8").includes("createObservabilityServer"));
+  const observerModule = await import(pathToFileURL(join(installedRoot, "dist", "observer", "index.js")).href);
+  assert.equal(typeof observerModule.ObserverRuntime, "function");
 
   const bin = join(temporary, "node_modules", ".bin", "observability-agent-mcp");
   assert(statSync(bin).isFile());
+  assert(statSync(join(temporary, "node_modules", ".bin", "observability-agent-mcp-observer")).isFile());
   const transport = new StdioClientTransport({ command: bin, stderr: "pipe" });
   const client = new Client({ name: "installed-package-smoke", version: "1.0.0" });
   try {

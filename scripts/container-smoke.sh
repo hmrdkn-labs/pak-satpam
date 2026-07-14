@@ -40,6 +40,7 @@ printf '%s\n' 'mcp-container-smoke-token-123' >"$temporary/mcp-token"
 chmod 600 "$temporary"/*
 
 docker volume create "$volume" >/dev/null
+docker run --rm --entrypoint test "$image" -f /app/dist/observer/cli.js
 docker run --rm --user 0:0 \
   --volume "$temporary:/source:ro" \
   --volume "$volume:/target" \

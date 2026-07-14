@@ -13,6 +13,7 @@ export interface GitHubAppTokenProviderOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
   readonly apiBaseUrl?: string;
+  readonly actionsPermission?: "read" | "write";
 }
 
 export class StaticGitHubTokenProvider implements CITokenProvider {
@@ -30,6 +31,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
   readonly #apiBaseUrl: string;
+  readonly #actionsPermission: "read" | "write";
   readonly #cached = new Map<string, { token: string; expiresAt: number }>();
 
   constructor(options: GitHubAppTokenProviderOptions) {
@@ -47,6 +49,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#apiBaseUrl = trustedGitHubApiBase(options.apiBaseUrl);
+    this.#actionsPermission = options.actionsPermission ?? "write";
   }
 
   static fromPemFile(options: Omit<GitHubAppTokenProviderOptions, "privateKeyPem"> & { pemKeyFile: string }): GitHubAppTokenProvider {
@@ -74,7 +77,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
         },
         body: JSON.stringify({
           repositories: [repository.split("/")[1]],
-          permissions: { actions: "write" },
+          permissions: { actions: this.#actionsPermission },
         }),
         redirect: "error",
         signal: AbortSignal.timeout(10_000),

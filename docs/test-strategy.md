@@ -56,6 +56,10 @@ safe variables, renderer failure, and teardown without production data.
   permission denial, policy rejection, duplicate approvals, replayed or expired
   tokens, concurrent approval consumption, failed reruns, and incomplete audit
   metadata.
+- Observer success/failure/cancelled/timed-out outcomes, signed route selection,
+  duplicate delivery, restart recovery, stale records, bounded pagination
+  truncation, GitHub/Hermes unavailability, provider quota errors, malformed
+  responses, payload truncation, and absence of raw log lines or credentials.
 
 ## Live Shadow
 

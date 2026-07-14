@@ -2,7 +2,8 @@
 
 This reusable adapter contract connects the existing bounded CI evidence tools
 to a CI event loop without adding a new tool surface or autonomous behavior.
-The caller owns scheduling and state transitions.
+The optional observer companion may own bounded polling and delivery state; the
+deployment still owns its exact allowlists, routes, credentials, and lifecycle.
 
 ```text
 observe -> classify -> bounded redacted evidence -> dry-run plan

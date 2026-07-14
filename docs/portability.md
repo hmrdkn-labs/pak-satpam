@@ -9,12 +9,15 @@ not.
 | npm package `@hamardikan/observability-agent-mcp` | stdio | Node.js 22 on Linux amd64 or arm64 |
 | npm package `@hamardikan/observability-agent-mcp` | private Streamable HTTP | Node.js 22 on Linux amd64 or arm64 |
 | OCI image `ghcr.io/hamardikan/observability-agent-mcp` | stdio or private Streamable HTTP | `linux/amd64`, `linux/arm64` |
+| npm package or OCI image | private CI observer companion | Node.js 22 on Linux amd64 or arm64 |
 
 The public identifiers are compatibility contracts: npm package
 `@hamardikan/observability-agent-mcp`, CLI `observability-agent-mcp`, HTTP
 entrypoint `dist/http-cli.js`, OCI image
 `ghcr.io/hamardikan/observability-agent-mcp`, commit tag `sha-<commit>`, and
 MCP schema version `1.0`. Portability work must not rename them.
+The optional observer CLI `observability-agent-mcp-observer` is additive and
+does not change the MCP server identity or tool contract.
 
 ## Stdio
 
@@ -72,6 +75,11 @@ docker run --rm --platform linux/arm64 "$IMAGE" dist/cli.js
 For private HTTP, mount the runtime directory read-only and pass the same
 environment variables. The non-root image uses `node` as its entrypoint;
 `dist/cli.js` selects stdio and `dist/http-cli.js` selects HTTP.
+
+The same image runs the observer with `dist/observer/cli.js`. Deployments must
+mount its policy, GitHub App identity, installation IDs, HMAC key, and writable
+metadata-only state path explicitly. The observer opens only its configured
+health/metrics listener and outbound GitHub/Hermes connections.
 
 ## Gates
 

@@ -14,6 +14,13 @@ Implemented:
   repository validation workflow.
 - Publish workflow preflight now runs the TypeScript typecheck before producing
   the existing immutable multi-architecture GHCR artifact.
+- Optional non-root CI observer companion with exact allowlists, read-only
+  GitHub App tokens, bounded terminal polling, durable lease/dedupe state,
+  signed internal delivery, sanitized health/metrics, and separate lightweight
+  success versus failure-analysis routes.
+- Observer restart recovery, same-poll dedupe, long-running completion safety,
+  pagination truncation health, provider/Hermes failures, and metadata-only
+  evidence have deterministic tests.
 
 Not yet live:
 

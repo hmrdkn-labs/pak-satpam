@@ -17,6 +17,7 @@ import { createCIAllowlist } from "../ci/policy.js";
 import type { CIService } from "../ci/service.js";
 import { GitHubActionsProvider } from "../providers/github-actions-provider.js";
 import { GitHubAppTokenProvider } from "../providers/github-app-token-provider.js";
+import { MappedGitHubAppTokenProvider } from "../providers/mapped-github-app-token-provider.js";
 
 const MAX_CONFIG_BYTES = 256 * 1_024;
 
@@ -67,13 +68,23 @@ const DashboardSchema = z
 const CIAllowlistEntrySchema = z
   .object({ repo: CIRepositorySchema, workflows: z.array(CIWorkflowSchema).min(1).max(50) })
   .strict();
+const GitHubInstallationSchema = z.union([
+  z.object({ repo: CIRepositorySchema, installation_id_file: z.string().min(1).max(1_024) }).strict(),
+  z.object({ owner: z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/), installation_id_file: z.string().min(1).max(1_024) }).strict(),
+]);
 const GitHubAppSchema = z
   .object({
     app_id_file: z.string().min(1).max(1_024),
-    installation_id_file: z.string().min(1).max(1_024),
+    installation_id_file: z.string().min(1).max(1_024).optional(),
+    installations: z.array(GitHubInstallationSchema).min(1).max(100).optional(),
     pem_key_file: z.string().min(1).max(1_024),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.installation_id_file === undefined) === (value.installations === undefined)) {
+      context.addIssue({ code: "custom", path: ["installations"], message: "configure one installation mode" });
+    }
+  });
 const CIConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -248,17 +259,31 @@ function buildCIConfiguration(
     throw new Error("Invalid CI runtime configuration");
   }
   const repositories = configuration.allowlist.map((entry) => entry.repo);
-  const tokenProvider = configuration.github.app === undefined
+  const app = configuration.github.app;
+  const clock = options.clock ?? (() => new Date());
+  const tokenProvider = app === undefined
     ? undefined
-    : GitHubAppTokenProvider.fromPemFile({
-        appId: readNumericSecretFile(configuration.github.app.app_id_file),
-        installationId: readNumericSecretFile(configuration.github.app.installation_id_file),
-        pemKeyFile: configuration.github.app.pem_key_file,
-        allowedRepositories: repositories,
-        fetch: options.fetch,
-        ...(options.clock === undefined ? {} : { clock: options.clock }),
-        apiBaseUrl: configuration.github.api_base_url,
-      });
+    : app.installations !== undefined
+      ? MappedGitHubAppTokenProvider.fromFiles({
+          appIdFile: app.app_id_file,
+          pemKeyFile: app.pem_key_file,
+          installations: app.installations.map((entry) => "repo" in entry
+            ? { repo: entry.repo, installationIdFile: entry.installation_id_file }
+            : { owner: entry.owner, installationIdFile: entry.installation_id_file }),
+          repositories,
+          fetch: options.fetch,
+          clock,
+          apiBaseUrl: configuration.github.api_base_url,
+        })
+      : GitHubAppTokenProvider.fromPemFile({
+          appId: readNumericSecretFile(app.app_id_file),
+          installationId: readNumericSecretFile(app.installation_id_file ?? ""),
+          pemKeyFile: app.pem_key_file,
+          allowedRepositories: repositories,
+          fetch: options.fetch,
+          clock,
+          apiBaseUrl: configuration.github.api_base_url,
+        });
   if (tokenProvider === undefined) throw new Error("CI runtime configuration requires a GitHub App or token file");
   const key = ApprovalTokenService.readKeyFile(configuration.approval.key_file);
   const audit = new FileApprovalAuditStore({ replayPath: configuration.approval.replay_file, auditPath: configuration.approval.audit_file });
