@@ -13,6 +13,16 @@ export type {
   ObservabilityProvider,
   ObservabilityVisualProvider,
 } from "./providers/observability-provider.js";
+export * from "./domain/telemetry-schemas.js";
+export {
+  TelemetryHttpEvidenceAdapter,
+  TelemetryQueryError,
+  type TelemetryEvidencePort,
+  type TelemetryHttpEvidenceAdapterOptions,
+  type TelemetryQueryDefinition,
+  type TelemetryQueryKind,
+} from "./providers/telemetry-evidence-provider.js";
+export * from "./telemetry/index.js";
 export {
   renderSyntheticDashboard,
   renderSyntheticPanel,
