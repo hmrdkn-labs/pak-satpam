@@ -137,6 +137,7 @@ function normalizeBaseUrl(value: string): URL {
   if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) {
     throw new Error("baseUrl must be an absolute HTTP(S) URL without credentials, query, or fragment");
   }
+  if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
   return url;
 }
 
@@ -145,11 +146,19 @@ function allowlistedRenderUrl(
   route: string,
   request: RenderPanelInput | RenderDashboardInput,
 ): URL {
-  if (!route.startsWith("/render/") || route.includes("#")) {
+  if (!route.startsWith("/") || route.includes("#")) {
     throw new Error("invalid route");
   }
-  const url = new URL(route, baseUrl);
-  if (url.origin !== baseUrl.origin || !url.pathname.startsWith("/render/")) throw new Error("invalid route");
+  const basePath = baseUrl.pathname.replace(/\/+$/, "");
+  const routePath = route.replace(/^\/+/, "");
+  const url = new URL(
+    basePath !== "" && (route === basePath || route.startsWith(`${basePath}/`))
+      ? route.replace(/^\/+/, "")
+      : routePath,
+    basePath !== "" && (route === basePath || route.startsWith(`${basePath}/`)) ? new URL(baseUrl.origin) : baseUrl,
+  );
+  const renderPrefix = `${basePath === "" ? "" : `${basePath}/`}render/`;
+  if (url.origin !== baseUrl.origin || !url.pathname.startsWith(renderPrefix)) throw new Error("invalid route");
   const configuredKeys = [...url.searchParams.keys()];
   if (
     configuredKeys.some((key) => key !== "panelId") ||

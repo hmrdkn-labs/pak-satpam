@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import {
   CIFailedJobAnalysisResultSchema,
   CILogEvidenceResultSchema,
@@ -21,6 +22,7 @@ import { CIProviderError, type CIProvider } from "./ci-provider.js";
 
 const MAX_RESPONSE_BYTES = 2 * 1_024 * 1_024;
 const ZERO_SHA = "0".repeat(40);
+const JENKINS_PROVIDER_NAME = "jenkins" as const;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -28,6 +30,10 @@ export interface JenkinsProviderOptions {
   readonly baseUrl: string;
   /** Branch in a multibranch job; challenge deployments use main. */
   readonly branch?: string;
+  /** Jenkins API token authentication; anonymous read access remains supported. */
+  readonly username?: string;
+  readonly token?: string;
+  readonly tokenFile?: string;
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
   readonly maxFreshnessMs?: number;
@@ -40,18 +46,20 @@ export class JenkinsProvider implements CIProvider {
   readonly #clock: () => Date;
   readonly #maxFreshnessMs: number;
   readonly #branch: string | undefined;
+  readonly #authorization: string | undefined;
   constructor(options: JenkinsProviderOptions) {
     this.#baseUrl = trustedBaseUrl(options.baseUrl);
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#maxFreshnessMs = options.maxFreshnessMs ?? 5 * 60_000;
     this.#branch = options.branch === undefined ? "main" : options.branch;
+    this.#authorization = basicAuthorization(options);
   }
 
   async getWorkflowStatus(input: CIWorkflowStatusInput): Promise<CIWorkflowStatusResult> {
     const build = await this.getBuild(input.workflow, input.runId);
     const run = normalizeBuild(build, input.repo, input.workflow);
-    return CIWorkflowStatusResultSchema.parse(makeCIEvidence("jenkins", this.#clock(), { run }, {
+    return CIWorkflowStatusResultSchema.parse(makeCIEvidence(JENKINS_PROVIDER_NAME, this.#clock(), { run }, {
       freshness: freshness(run.updatedAt, this.#clock, this.#maxFreshnessMs),
     }));
   }
@@ -76,7 +84,7 @@ export class JenkinsProvider implements CIProvider {
     const rawLines = raw.split(/\r?\n/).filter((line) => line.length > 0);
     const selected = rawLines.slice(0, Math.min(input.maxLines, 200)).map((line, index) => ({ sequence: index + 1, ...redactText(line) }));
     const lines = selected.map(({ sequence, text }) => ({ sequence, text }));
-    return CILogEvidenceResultSchema.parse(makeCIEvidence("jenkins", this.#clock(), {
+    return CILogEvidenceResultSchema.parse(makeCIEvidence(JENKINS_PROVIDER_NAME, this.#clock(), {
       runId: input.runId,
       jobId: input.jobId,
       jobName: input.workflow,
@@ -97,7 +105,7 @@ export class JenkinsProvider implements CIProvider {
       steps: ["Inspect the bounded Jenkins failure evidence", "Reproduce the focused check before changing code"],
       runbook: `docs/ci-cd-runbook.md#${job.category}`,
     }])).values()];
-    return CIRemediationPlanResultSchema.parse(makeCIEvidence("jenkins", this.#clock(), {
+    return CIRemediationPlanResultSchema.parse(makeCIEvidence(JENKINS_PROVIDER_NAME, this.#clock(), {
       runId: input.runId,
       dryRun: true,
       actions,
@@ -115,9 +123,12 @@ export class JenkinsProvider implements CIProvider {
 
   private async request(path: string): Promise<Response> {
     try {
-      return await this.#fetch(new URL(path, this.#baseUrl), {
+      return await this.#fetch(resolveProviderUrl(this.#baseUrl, path), {
         method: "GET",
-        headers: { accept: "application/json, text/plain" },
+        headers: {
+          accept: "application/json, text/plain",
+          ...(this.#authorization === undefined ? {} : { authorization: this.#authorization }),
+        },
         redirect: "error",
         signal: AbortSignal.timeout(10_000),
       });
@@ -134,9 +145,32 @@ function trustedBaseUrl(value: string): URL {
   return url;
 }
 
+function resolveProviderUrl(baseUrl: URL, path: string): URL {
+  const url = new URL(path.replace(/^\/+/, ""), baseUrl);
+  if (url.origin !== baseUrl.origin) throw new CIProviderError("permission");
+  return url;
+}
+
+function basicAuthorization(options: JenkinsProviderOptions): string | undefined {
+  if (options.token !== undefined && options.tokenFile !== undefined) throw new Error("Configure one Jenkins token source");
+  let token = options.token;
+  if (options.tokenFile !== undefined) {
+    const metadata = statSync(options.tokenFile);
+    if (!metadata.isFile() || metadata.size < 1 || metadata.size > 4 * 1_024 || (metadata.mode & 0o077) !== 0) {
+      throw new Error("Invalid Jenkins token file");
+    }
+    token = readFileSync(options.tokenFile, "utf8").trim();
+  }
+  if (token === undefined && options.username === undefined) return undefined;
+  if (options.username === undefined || token === undefined || options.username.length === 0 || token.length === 0) {
+    throw new Error("Jenkins Basic auth requires username and token");
+  }
+  return `Basic ${Buffer.from(`${options.username}:${token}`, "utf8").toString("base64")}`;
+}
+
 function buildPath(workflow: string, branch: string | undefined, ...parts: string[]): string {
-  const segments = workflow.split("/").filter(Boolean);
-  if (segments.length === 0 || segments.some((segment) => segment === "." || segment === "..") || (branch !== undefined && (branch.length === 0 || branch === "." || branch === ".."))) throw new CIProviderError("malformed");
+  const segments = workflow.split("/");
+  if (segments.length === 0 || segments.some((segment) => segment.length === 0 || segment === "." || segment === "..") || (branch !== undefined && (branch.length === 0 || branch === "." || branch === ".."))) throw new CIProviderError("malformed");
   const jobSegments = branch === undefined ? segments : [...segments, branch];
   const endpoint = parts.pop();
   const path = `/${jobSegments.map((segment) => `job/${encodeURIComponent(segment)}`).join("/")}/${parts.map((part) => encodeURIComponent(part)).join("/")}`;
@@ -171,8 +205,8 @@ function normalizeBuild(raw: JsonRecord, repository: string, workflow: string): 
   const building = raw.building === true;
   const result = raw.result;
   const conclusion = building ? null : result === "SUCCESS" ? "success" : result === "ABORTED" ? "cancelled" : result === null || result === undefined ? "unknown" : "failure";
-  const timestamp = typeof raw.timestamp === "number" ? new Date(raw.timestamp) : new Date();
-  if (Number.isNaN(timestamp.getTime())) throw new CIProviderError("malformed");
+  const timestamp = typeof raw.timestamp === "number" ? new Date(raw.timestamp) : undefined;
+  if (timestamp === undefined || Number.isNaN(timestamp.getTime())) throw new CIProviderError("malformed");
   const updated = new Date(timestamp.getTime() + (typeof raw.duration === "number" ? Math.max(0, raw.duration) : 0));
   return {
     id,

@@ -11,6 +11,7 @@ function provider(fetch: typeof globalThis.fetch) {
     fetch,
     clock: () => NOW,
     maxFreshnessMs: 5 * 60_000,
+    apiBaseUrl: "https://api.github.com/",
   });
 }
 

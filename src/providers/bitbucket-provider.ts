@@ -22,6 +22,7 @@ import { CIProviderError, type CIProvider } from "./ci-provider.js";
 
 const MAX_RESPONSE_BYTES = 2 * 1_024 * 1_024;
 const ZERO_SHA = "0".repeat(40);
+const BITBUCKET_PROVIDER_NAME = "bitbucket-cloud" as const;
 type JsonRecord = Record<string, unknown>;
 
 export interface BitbucketCommitStatus {
@@ -50,7 +51,7 @@ export interface BitbucketProviderOptions {
   readonly maxFreshnessMs?: number;
 }
 
-/** Read-only Bitbucket Cloud/Server adapter. No pipeline rerun or source mutation is exposed. */
+/** Read-only Bitbucket Cloud adapter. Bitbucket Data Center is not supported. */
 export class BitbucketProvider implements CIProvider {
   readonly #baseUrl: URL;
   readonly #authorization: string;
@@ -69,7 +70,7 @@ export class BitbucketProvider implements CIProvider {
   async getWorkflowStatus(input: CIWorkflowStatusInput): Promise<CIWorkflowStatusResult> {
     const raw = await this.pipeline(input.repo, input.runId);
     const run = normalizePipeline(raw, input.repo, input.workflow, input.runId);
-    return CIWorkflowStatusResultSchema.parse(makeCIEvidence("bitbucket", this.#clock(), { run }, {
+    return CIWorkflowStatusResultSchema.parse(makeCIEvidence(BITBUCKET_PROVIDER_NAME, this.#clock(), { run }, {
       freshness: freshness(run.updatedAt, this.#clock, this.#maxFreshnessMs),
     }));
   }
@@ -94,7 +95,7 @@ export class BitbucketProvider implements CIProvider {
     const rawLines = raw.split(/\r?\n/).filter((line) => line.length > 0);
     const selected = rawLines.slice(0, Math.min(input.maxLines, 200)).map((line, index) => ({ sequence: index + 1, ...redactText(line) }));
     const lines = selected.map(({ sequence, text }) => ({ sequence, text }));
-    return CILogEvidenceResultSchema.parse(makeCIEvidence("bitbucket", this.#clock(), {
+    return CILogEvidenceResultSchema.parse(makeCIEvidence(BITBUCKET_PROVIDER_NAME, this.#clock(), {
       runId: input.runId,
       jobId: input.jobId,
       jobName: input.workflow,
@@ -112,7 +113,7 @@ export class BitbucketProvider implements CIProvider {
       steps: ["Inspect the bounded Bitbucket failure evidence", "Reproduce the focused check before changing code"],
       runbook: `docs/ci-cd-runbook.md#${job.category}`,
     }])).values()];
-    return CIRemediationPlanResultSchema.parse(makeCIEvidence("bitbucket", this.#clock(), { runId: input.runId, dryRun: true, actions }, {
+    return CIRemediationPlanResultSchema.parse(makeCIEvidence(BITBUCKET_PROVIDER_NAME, this.#clock(), { runId: input.runId, dryRun: true, actions }, {
       freshness: analysis.freshness,
       warnings: analysis.warnings,
       redactionsApplied: analysis.redactionsApplied,
@@ -193,7 +194,7 @@ export class BitbucketProvider implements CIProvider {
 
   private async request(path: string): Promise<Response> {
     try {
-      return await this.#fetch(new URL(path, this.#baseUrl), {
+      return await this.#fetch(resolveProviderUrl(this.#baseUrl, path), {
         method: "GET",
         headers: { accept: "application/json, text/plain", authorization: this.#authorization },
         redirect: "error",
@@ -212,6 +213,12 @@ function trustedBaseUrl(value: string): URL {
   return url;
 }
 
+function resolveProviderUrl(baseUrl: URL, path: string): URL {
+  const url = new URL(path.replace(/^\/+/, ""), baseUrl);
+  if (url.origin !== baseUrl.origin) throw new CIProviderError("permission");
+  return url;
+}
+
 function basicAuthorization(options: BitbucketProviderOptions): string {
   let value = options.token;
   if (options.tokenFile !== undefined) {
@@ -226,8 +233,8 @@ function basicAuthorization(options: BitbucketProviderOptions): string {
 }
 
 function repositoryPath(repository: string): string {
-  const [workspace, slug] = repository.split("/");
-  if (workspace === undefined || slug === undefined || workspace.length === 0 || slug.length === 0) throw new CIProviderError("malformed");
+  const [workspace, slug, extra] = repository.split("/");
+  if (workspace === undefined || slug === undefined || extra !== undefined || workspace.length === 0 || slug.length === 0) throw new CIProviderError("malformed");
   return `${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}`;
 }
 
@@ -237,15 +244,27 @@ function normalizePipeline(raw: JsonRecord, repository: string, workflow: string
   if (!/^\d{1,20}$/.test(id)) throw new CIProviderError("malformed");
   const state = raw.state !== null && typeof raw.state === "object" && !Array.isArray(raw.state) ? raw.state as JsonRecord : {};
   const stateName = typeof state.name === "string" ? state.name.toUpperCase() : "UNKNOWN";
-  const result = stateName === "SUCCESSFUL" ? "success" : stateName === "FAILED" ? "failure" : stateName === "STOPPED" ? "cancelled" : stateName === "PAUSED" ? "action_required" : stateName === "UNKNOWN" ? "unknown" : null;
-  const status = ["PENDING", "IN_PROGRESS", "PAUSED"].includes(stateName) ? "in_progress" : "completed";
-  const created = timestamp(raw.created_on) ?? new Date().toISOString();
+  const result = state.result !== null && typeof state.result === "object" && !Array.isArray(state.result) ? state.result as JsonRecord : {};
+  const resultName = typeof result.name === "string" ? result.name.toUpperCase() : stateName;
+  const conclusion = pipelineConclusion(stateName, resultName);
+  const status = ["PENDING", "IN_PROGRESS", "PAUSED", "RUNNING"].includes(stateName) ? "in_progress" : "completed";
+  const created = timestamp(raw.created_on);
+  if (created === undefined) throw new CIProviderError("malformed");
   const updated = timestamp(raw.completed_on) ?? created;
   const target = raw.target !== null && typeof raw.target === "object" && !Array.isArray(raw.target) ? raw.target as JsonRecord : {};
   const commit = target.commit !== null && typeof target.commit === "object" && !Array.isArray(target.commit) ? target.commit as JsonRecord : {};
   const ref = target.ref_name;
   const sha = typeof commit.hash === "string" && /^[a-f0-9]{40}$/i.test(commit.hash) ? commit.hash.toLowerCase() : ZERO_SHA;
-  return { id, repository, workflow, status, conclusion: result, runAttempt: 1, event: "bitbucket", ref: typeof ref === "string" && ref.length > 0 ? ref : "unknown", sha, createdAt: created, updatedAt: updated };
+  return { id, repository, workflow, status, conclusion, runAttempt: 1, event: BITBUCKET_PROVIDER_NAME, ref: typeof ref === "string" && ref.length > 0 ? ref : "unknown", sha, createdAt: created, updatedAt: updated };
+}
+
+function pipelineConclusion(stateName: string, resultName: string): CIWorkflowRun["conclusion"] {
+  if (["PENDING", "IN_PROGRESS", "RUNNING"].includes(stateName)) return null;
+  if (stateName === "PAUSED") return "action_required";
+  if (resultName === "SUCCESSFUL") return "success";
+  if (["FAILED", "ERROR"].includes(resultName)) return "failure";
+  if (["STOPPED", "HALTED"].includes(resultName) || ["STOPPED", "HALTED"].includes(stateName)) return "cancelled";
+  return "unknown";
 }
 
 function timestamp(value: unknown): string | undefined {

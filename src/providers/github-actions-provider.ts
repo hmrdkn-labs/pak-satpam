@@ -22,6 +22,7 @@ import { redactText } from "../ci/redaction.js";
 
 const GITHUB_API_VERSION = "2022-11-28";
 const MAX_RESPONSE_BYTES = 2 * 1_024 * 1_024;
+const GITHUB_PROVIDER_NAME = "github-actions" as const;
 
 export interface GitHubActionsProviderOptions {
   readonly token?: string;
@@ -38,7 +39,7 @@ export class GitHubActionsProvider implements CIProvider {
   readonly #writeTokenProvider: CITokenProvider | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
-  readonly #apiBaseUrl: string;
+  readonly #apiBaseUrl: URL;
   readonly #maxFreshnessMs: number;
 
   constructor(options: GitHubActionsProviderOptions) {
@@ -58,7 +59,7 @@ export class GitHubActionsProvider implements CIProvider {
     const value = await this.getJson(path, input.repo);
     const rawRun = input.runId === undefined ? firstRun(value) : value;
     const run = normalizeRun(rawRun, input.repo, input.workflow);
-    return CIWorkflowStatusResultSchema.parse(makeCIEvidence("github-actions", this.#clock(), { run }, { freshness: freshness(run.updatedAt, this.#clock, this.#maxFreshnessMs) }));
+    return CIWorkflowStatusResultSchema.parse(makeCIEvidence(GITHUB_PROVIDER_NAME, this.#clock(), { run }, { freshness: freshness(run.updatedAt, this.#clock, this.#maxFreshnessMs) }));
   }
 
   async listWorkflowRuns(input: CIWorkflowRunListInput): Promise<CIWorkflowRunListResult> {
@@ -106,7 +107,7 @@ export class GitHubActionsProvider implements CIProvider {
     const selected = rawLines.slice(0, input.maxLines).map((line, index) => ({ sequence: index + 1, ...redactText(line) }));
     const lines = selected.map(({ sequence, text }) => ({ sequence, text }));
     const redactionsApplied = selected.some((line) => line.redacted);
-    return CILogEvidenceResultSchema.parse(makeCIEvidence("github-actions", this.#clock(), {
+    return CILogEvidenceResultSchema.parse(makeCIEvidence(GITHUB_PROVIDER_NAME, this.#clock(), {
       runId: input.runId,
       jobId: input.jobId,
       jobName: `job-${input.jobId}`,
@@ -124,13 +125,13 @@ export class GitHubActionsProvider implements CIProvider {
       steps: remediationSteps(job.category),
       runbook: `docs/ci-cd-runbook.md#${job.category}`,
     }])).values()];
-    return CIRemediationPlanResultSchema.parse(makeCIEvidence("github-actions", this.#clock(), { runId: input.runId, dryRun: true, actions }, { freshness: analysis.freshness, warnings: analysis.warnings, redactionsApplied: analysis.redactionsApplied }));
+    return CIRemediationPlanResultSchema.parse(makeCIEvidence(GITHUB_PROVIDER_NAME, this.#clock(), { runId: input.runId, dryRun: true, actions }, { freshness: analysis.freshness, warnings: analysis.warnings, redactionsApplied: analysis.redactionsApplied }));
   }
 
   async rerunFailedWorkflow(input: { repo: string; workflow: string; runId: string }): Promise<CIRerunFailedWorkflowResult> {
     const response = await this.request(`/repos/${input.repo}/actions/runs/${input.runId}/rerun-failed-jobs`, "POST", input.repo);
     if (![200, 201, 202, 204].includes(response.status)) throw httpError(response.status);
-    return CIRerunFailedWorkflowResultSchema.parse(makeCIEvidence("github-actions", this.#clock(), { runId: input.runId, requestId: "operator-approved", accepted: true, action: "rerun-failed-jobs" }));
+    return CIRerunFailedWorkflowResultSchema.parse(makeCIEvidence(GITHUB_PROVIDER_NAME, this.#clock(), { runId: input.runId, requestId: "operator-approved", accepted: true, action: "rerun-failed-jobs" }));
   }
 
   private async getJson(path: string, repository: string): Promise<Record<string, unknown>> {
@@ -174,7 +175,7 @@ export class GitHubActionsProvider implements CIProvider {
       redirect,
       signal: AbortSignal.timeout(10_000),
     };
-    return this.#fetch(`${this.#apiBaseUrl}${path}`, init).catch(() => { throw new CIProviderError("unavailable"); });
+    return this.#fetch(resolveProviderUrl(this.#apiBaseUrl, path).toString(), init).catch(() => { throw new CIProviderError("unavailable"); });
   }
 }
 
@@ -185,12 +186,18 @@ function isGitHubActionsLogHost(hostname: string): boolean {
     || normalized === "results-receiver.actions.githubusercontent.com"
     || normalized.endsWith(".blob.core.windows.net");
 }
-function trustedGitHubApiBase(value: string | undefined): string {
+function trustedGitHubApiBase(value: string | undefined): URL {
   const url = new URL(value ?? "https://api.github.com");
   if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "" || url.username !== "" || url.password !== "" || (url.pathname !== "/" && url.pathname !== "")) {
     throw new Error("GitHub API base URL is not trusted");
   }
-  return "https://api.github.com";
+  return url;
+}
+
+function resolveProviderUrl(baseUrl: URL, path: string): URL {
+  const url = new URL(path.replace(/^\/+/, ""), baseUrl);
+  if (url.origin !== baseUrl.origin) throw new CIProviderError("permission");
+  return url;
 }
 
 function encode(value: string): string { return encodeURIComponent(value); }

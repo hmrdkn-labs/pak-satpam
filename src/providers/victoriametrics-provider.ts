@@ -29,6 +29,8 @@ const MAX_SAMPLES_PER_SERIES = 1_440;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const VMALERT_ALERTS_PATH = "/api/v1/alerts";
 const GRAFANA_ALERTMANAGER_ALERTS_PATH = "/api/alertmanager/grafana/api/v2/alerts";
+const PROMETHEUS_PROVIDER_CLASS = "prometheus-compatible" as const;
+const GRAFANA_PROVIDER_CLASS = "grafana" as const;
 
 export interface VictoriaMetricsQueryTemplate {
   /** Static PromQL owned by the deployment configuration. */
@@ -88,7 +90,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
   constructor(options: VictoriaMetricsProviderOptions) {
     this.#options = options;
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
-    this.providerClass = options.alertsProvider === "grafana-alertmanager" ? "grafana" : "prometheus-compatible";
+    this.providerClass = options.alertsProvider === "grafana-alertmanager" ? GRAFANA_PROVIDER_CLASS : PROMETHEUS_PROVIDER_CLASS;
     this.alertsUrl = normalizeEndpointUrl(
       options.alertsBaseUrl,
       this.providerClass === "grafana" ? GRAFANA_ALERTMANAGER_ALERTS_PATH : VMALERT_ALERTS_PATH,
@@ -343,8 +345,8 @@ function normalizeBaseUrl(value: string): URL {
 function normalizeEndpointUrl(value: string, endpointPath: string): URL {
   const url = normalizeBaseUrl(value);
   const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = basePath === "" || basePath === endpointPath
-    ? endpointPath
+  url.pathname = basePath === "" || basePath === endpointPath || basePath.endsWith(endpointPath)
+    ? (basePath === "" ? endpointPath : basePath)
     : `${basePath}${endpointPath}`;
   return url;
 }

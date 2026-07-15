@@ -30,7 +30,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
   readonly #allowedRepositories: ReadonlySet<string>;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
-  readonly #apiBaseUrl: string;
+  readonly #apiBaseUrl: URL;
   readonly #actionsPermission: "read" | "write";
   readonly #cached = new Map<string, { token: string; expiresAt: number }>();
 
@@ -66,7 +66,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
 
     const jwt = this.createJwt();
     const response = await this.#fetch(
-      `${this.#apiBaseUrl}/app/installations/${encodeURIComponent(this.#installationId)}/access_tokens`,
+      new URL(`app/installations/${encodeURIComponent(this.#installationId)}/access_tokens`, this.#apiBaseUrl).toString(),
       {
         method: "POST",
         headers: {
@@ -106,12 +106,12 @@ export class GitHubAppTokenProvider implements CITokenProvider {
   }
 }
 
-function trustedGitHubApiBase(value: string | undefined): string {
+function trustedGitHubApiBase(value: string | undefined): URL {
   const url = new URL(value ?? "https://api.github.com");
   if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "" || url.username !== "" || url.password !== "" || (url.pathname !== "/" && url.pathname !== "")) {
     throw new Error("GitHub API base URL is not trusted");
   }
-  return "https://api.github.com";
+  return url;
 }
 
 function isTokenResponse(value: unknown): value is { token: string; expires_at: string } {

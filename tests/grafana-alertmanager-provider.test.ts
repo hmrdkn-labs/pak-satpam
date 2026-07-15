@@ -6,7 +6,9 @@ const NOW = new Date("2026-07-10T00:00:00.000Z");
 describe("Grafana embedded Alertmanager adapter", () => {
   it.each([
     "https://grafana.example",
+    "https://grafana.example/grafana",
     "https://grafana.example/api/alertmanager/grafana/api/v2/alerts",
+    "https://grafana.example/grafana/api/alertmanager/grafana/api/v2/alerts",
     "https://grafana.example/api/alertmanager/grafana/api/v2/alerts/",
   ])("uses the v2 read-only endpoint for origin and full-endpoint configuration: %s", async (alertsBaseUrl) => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify([
@@ -41,7 +43,7 @@ describe("Grafana embedded Alertmanager adapter", () => {
     })]);
     const requestUrl = new URL(String(fetch.mock.calls[0]?.[0]));
     expect(requestUrl.origin).toBe("https://grafana.example");
-    expect(requestUrl.pathname).toBe("/api/alertmanager/grafana/api/v2/alerts");
+    expect(requestUrl.pathname).toMatch(/\/api\/alertmanager\/grafana\/api\/v2\/alerts$/);
     expect(requestUrl.pathname).not.toContain("api/alertmanager/grafana/api/v2/alerts/api/");
     expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "error" });
   });
