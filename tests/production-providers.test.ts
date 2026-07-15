@@ -184,6 +184,25 @@ describe("VictoriaMetricsProvider", () => {
     expect(String(fetch.mock.calls[0]?.[0])).toBe("https://vmalert.internal/api/v1/alerts");
   });
 
+  it("accepts a full vmalert alerts endpoint without duplicating its path", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      response({ status: "success", data: { alerts: [] } }),
+    );
+    const provider = new VictoriaMetricsProvider({
+      baseUrl: "https://metrics.internal",
+      alertsBaseUrl: "https://vmalert.internal/api/v1/alerts",
+      fetch,
+      queryTemplates: {},
+      serviceHealth: {},
+    });
+
+    await provider.activeAlerts({});
+
+    const requestUrl = new URL(String(fetch.mock.calls[0]?.[0]));
+    expect(requestUrl.origin).toBe("https://vmalert.internal");
+    expect(requestUrl.pathname).toBe("/api/v1/alerts");
+  });
+
   it("returns schema-valid unknown evidence on timeout without exposing upstream errors", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation((_url, init) =>
       new Promise((_resolve, reject) => {
