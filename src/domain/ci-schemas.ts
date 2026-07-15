@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CIProviderNameSchema } from "./ci-provider-contracts.js";
 
 export const CI_SCHEMA_VERSION = "1.0" as const;
 
@@ -14,7 +15,9 @@ export const CICategorySchema = z.enum([
 ]);
 export type CICategory = z.infer<typeof CICategorySchema>;
 
-export const CIProviderClassSchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/);
+/** Legacy wire field kept opaque; registry identity is name plus kind. */
+export const CIProviderClassSchema = CIProviderNameSchema;
+export type CIProviderClass = z.infer<typeof CIProviderClassSchema>;
 export const CIRepositorySchema = z
   .string()
   .min(3)
@@ -190,7 +193,7 @@ export function classifyFailure(...parts: readonly string[]): CICategory {
 }
 
 export function makeCIEvidence<T>(
-  providerClass: string,
+  providerClass: CIProviderClass,
   observedAt: Date,
   data: T,
   options: { freshness?: z.infer<typeof CIFreshnessSchema>; truncated?: boolean; redactionsApplied?: boolean; warnings?: readonly { code: string; message: string }[] } = {},

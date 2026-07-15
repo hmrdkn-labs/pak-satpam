@@ -11,8 +11,9 @@ import type {
   CIWorkflowStatusInput,
   CIWorkflowStatusResult,
 } from "../domain/ci-schemas.js";
+import type { CIProviderCapability, CIProviderName } from "../domain/ci-provider-contracts.js";
 
-export type CIProviderErrorCode = "unavailable" | "malformed" | "permission";
+export type CIProviderErrorCode = "unavailable" | "malformed" | "permission" | "unsupported";
 
 export class CIProviderError extends Error {
   constructor(readonly code: CIProviderErrorCode) {
@@ -21,13 +22,31 @@ export class CIProviderError extends Error {
   }
 }
 
-export interface CIProvider {
+export interface CIReadProvider {
   getWorkflowStatus(input: CIWorkflowStatusInput): Promise<CIWorkflowStatusResult>;
   listWorkflowRuns?(input: CIWorkflowRunListInput): Promise<CIWorkflowRunListResult>;
   getFailedJobAnalysis(input: CIFailedJobAnalysisInput): Promise<CIFailedJobAnalysisResult>;
   getLogEvidence(input: CILogEvidenceInput): Promise<CILogEvidenceResult>;
   getRemediationPlan(input: CIRemediationPlanInput): Promise<CIRemediationPlanResult>;
+}
+
+export interface CIRerunProvider {
   rerunFailedWorkflow(input: Omit<CIRerunFailedWorkflowInput, "requestId" | "approvalToken">): Promise<CIRerunFailedWorkflowResult>;
+}
+
+/** Compatibility shape for existing adapters that expose both ports. */
+export interface CIProvider extends CIReadProvider, CIRerunProvider {}
+
+export class CIUnsupportedCapabilityError extends CIProviderError {
+  readonly providerName: CIProviderName;
+  readonly capability: CIProviderCapability;
+
+  constructor(providerName: CIProviderName, capability: CIProviderCapability) {
+    super("unsupported");
+    this.name = "CIUnsupportedCapabilityError";
+    this.providerName = providerName;
+    this.capability = capability;
+  }
 }
 
 export interface CIWorkflowRunListInput {
