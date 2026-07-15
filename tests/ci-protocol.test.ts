@@ -16,12 +16,13 @@ const INPUT = {
 };
 const ACTION_BINDING = { ...INPUT, runAttempt: 1, headSha: "a".repeat(40) };
 
-function ci(fetch: typeof globalThis.fetch) {
+function ci(fetch: typeof globalThis.fetch, enableRerunTool = false) {
   return {
     provider: new GitHubActionsProvider({ token: "github-token-for-header", fetch, clock: () => NOW }),
     policy: createCIAllowlist({
       "owner/repo": ["goal14-controlled-fixture.yml"],
     }),
+    enableRerunTool,
     approval: new ApprovalTokenService({
       key: Buffer.from("c".repeat(32)),
       clock: () => NOW,
@@ -44,7 +45,7 @@ async function connectedServer(fetch: typeof globalThis.fetch) {
 }
 
 describe("CI MCP contract", () => {
-  it("registers the four read tools plus one mutating rerun tool only when configured", async () => {
+  it("keeps the combined surface read-only by default", async () => {
     const fetch = viFetch([
       new Response(JSON.stringify({ workflow_runs: [] }), { headers: { "content-type": "application/json" } }),
     ]);
@@ -62,13 +63,7 @@ describe("CI MCP contract", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.rerun_failed_workflow",
     ]);
-    expect(result.tools.find((tool) => tool.name === "ci.rerun_failed_workflow")?.annotations).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-    });
     await client.close();
     await server.close();
   });
@@ -87,7 +82,6 @@ describe("CI MCP contract", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.rerun_failed_workflow",
     ]);
     expect(result.tools.every((tool) => tool.name.startsWith("ci."))).toBe(true);
     await client.close();
@@ -176,7 +170,7 @@ describe("CI MCP contract", () => {
       new Response(JSON.stringify({ id: 101, status: "completed", conclusion: "failure", run_attempt: 1, event: "workflow_dispatch", head_branch: "main", head_sha: "a".repeat(40), created_at: "2026-07-10T00:00:00Z", updated_at: "2026-07-10T00:00:00Z" }), { headers: { "content-type": "application/json" } }),
       new Response(null, { status: 201 }),
     ]);
-    const configured = ci(fetch);
+    const configured = ci(fetch, true);
     const { client, server } = await (async () => {
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       const server = createObservabilityServer({ provider: new FakeObservabilityProvider(() => NOW), clock: () => NOW, ci: configured });

@@ -63,6 +63,7 @@ describe("private Streamable HTTP transport", () => {
         provider: new GitHubActionsProvider({ token: "github-token-for-http-test", fetch: globalThis.fetch, clock: () => FIXED_NOW }),
         policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
         approval: new ApprovalTokenService({ key: Buffer.from("c".repeat(32)), clock: () => FIXED_NOW, audit: new InMemoryApprovalAuditStore() }),
+        enableRerunTool: true,
       },
       bearerToken: TEST_CREDENTIAL,
       host: "127.0.0.1",

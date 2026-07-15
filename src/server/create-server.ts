@@ -250,7 +250,7 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
     },
     async (input) => ciRead(ci, "ci.remediation_plan", input, CIRemediationPlanResultSchema, clock, () => ci.provider.getRemediationPlan(input)),
   );
-  server.registerTool(
+  if (ci.enableRerunTool === true) server.registerTool(
     "ci.rerun_failed_workflow",
     {
       description: "With operator approval, rerun failed jobs for one failed or cancelled allowlisted run.",

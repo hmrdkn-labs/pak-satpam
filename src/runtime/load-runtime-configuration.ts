@@ -96,15 +96,21 @@ const CIConfigSchema = z
       .object({
         api_base_url: z.literal("https://api.github.com").default("https://api.github.com"),
         app: GitHubAppSchema.optional(),
+        enable_rerun_tool: z.boolean().default(false),
       })
       .strict()
       .optional(),
     jenkins: z
-      .object({ base_url: z.url() })
+      .object({ base_url: z.url(), enable_rerun_tool: z.boolean().default(false) })
       .strict()
       .optional(),
     bitbucket: z
-      .object({ base_url: z.url(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
+      .object({
+        base_url: z.url(),
+        token_file: z.string().min(1).max(1_024),
+        username: z.string().min(1).max(256).optional(),
+        enable_rerun_tool: z.boolean().default(false),
+      })
       .strict()
       .optional(),
     approval: z
@@ -302,6 +308,11 @@ function buildCIConfiguration(
   return {
     provider,
     policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
+    enableRerunTool: configuration.provider === "github"
+      ? configuration.github?.enable_rerun_tool === true
+      : configuration.provider === "jenkins"
+        ? configuration.jenkins?.enable_rerun_tool === true
+        : configuration.bitbucket?.enable_rerun_tool === true,
     approval: new ApprovalTokenService({ key, clock, audit }),
   };
 }

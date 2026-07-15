@@ -108,6 +108,7 @@ describe("private runtime configuration", () => {
       clock: () => FIXED_NOW,
     });
     expect(runtime.ci).toBeDefined();
+    expect(runtime.ci?.enableRerunTool).toBe(false);
   });
 
   it("loads the read-only Jenkins provider and Grafana Alertmanager option", async () => {
@@ -121,6 +122,7 @@ ci:
     - repo: academytools/planpal-infra-6
       workflows: [planpal-infra-6]
   jenkins:
+    enable_rerun_tool: true
     base_url: https://jenkins.local
   approval:
     key_file: ${approvalKeyPath}
@@ -136,6 +138,7 @@ ci:
     expect(fetch.mock.calls[0]?.[1]).toMatchObject({
       headers: { Authorization: "Bearer grafana-test-token-123456" },
     });
+    expect(runtime.ci?.enableRerunTool).toBe(true);
     expect(runtime.ci?.provider.constructor.name).toBe("JenkinsProvider");
   });
 
