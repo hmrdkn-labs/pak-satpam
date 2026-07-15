@@ -232,7 +232,10 @@ export function createCIServer(options: CreateCIServerOptions): McpServer {
 function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
   const metadata = validRuntimeMetadata(ci);
   if (metadata === undefined) return;
-  const provider = ci.provider;
+  const active = ci.providerRegistry?.select(metadata.name);
+  const provider = active?.provider ?? ci.provider;
+  const forensics = active?.forensics ?? ci.forensics;
+  const scm = active?.scm ?? ci.scm;
   const providerLabel = `${metadata.name} (${metadata.type})`;
   const readCapability = ci.providerRegistry?.supports(metadata.name, "read") ?? metadata.capabilities.read;
   const rerunCapability = ci.providerRegistry?.supports(metadata.name, "rerun") ?? metadata.capabilities.rerun;
@@ -286,12 +289,12 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
         outputSchema: CIFailureAnalysisResultSchema,
         annotations: READ_ONLY_ANNOTATIONS,
       },
-      async (input) => ciRead(ci, "ci.failure_analysis", input, CIFailureAnalysisResultSchema, clock, () => assembleFailureAnalysis({ provider, ...(ci.forensics === undefined ? {} : { evidence: ci.forensics }), input, clock })),
+      async (input) => ciRead(ci, "ci.failure_analysis", input, CIFailureAnalysisResultSchema, clock, () => assembleFailureAnalysis({ provider, ...(forensics === undefined ? {} : { evidence: forensics }), input, clock })),
     );
   }
 
-  if (readCapability && ci.scm !== undefined) {
-    const scmProvider = ci.scm;
+  if (readCapability && scm !== undefined) {
+    const scmProvider = scm;
     server.registerTool(
       "ci.scm_change_evidence",
       {
@@ -302,8 +305,8 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
       },
       async (input) => scmRead(ci, input, DirectSCMChangeEvidenceResultSchema, clock, () => scmProvider.getChangeEvidence(input)),
     );
-  } else if (readCapability && ci.forensics?.scm !== undefined) {
-    const scmProvider = ci.forensics.scm;
+  } else if (readCapability && forensics?.scm !== undefined) {
+    const scmProvider = forensics.scm;
     server.registerTool(
       "ci.scm_change_evidence",
       {
@@ -316,8 +319,8 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
     );
   }
 
-  if (readCapability && ci.forensics?.telemetry !== undefined) {
-    const telemetryProvider = ci.forensics.telemetry;
+  if (readCapability && forensics?.telemetry !== undefined) {
+    const telemetryProvider = forensics.telemetry;
     server.registerTool(
       "ci.telemetry_correlation",
       {

@@ -241,6 +241,51 @@ ci:
     });
   });
 
+  it("assembles every named CI and SCM provider independently and selects only the configured active entry", () => {
+    const bitbucketTokenPath = join(directory, "bitbucket-token");
+    writeFileSync(bitbucketTokenPath, "bitbucket-user:bitbucket-secret\n", { mode: 0o600 });
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}
+ci:
+  enabled: true
+  provider_name: jenkins-prod
+  providers:
+    jenkins-prod:
+      type: jenkins
+      jenkins:
+        base_url: https://jenkins.local
+      forensics:
+        scm:
+          job: academytools/planpal-infra-6
+          allowed_refs: [main]
+    bitbucket-prod:
+      type: bitbucket
+      bitbucket:
+        base_url: https://bitbucket.example/2.0
+        token_file: ${bitbucketTokenPath}
+      forensics:
+        scm:
+          allowed_refs: [main]
+
+  allowlist:
+    - repo: academytools/planpal-infra-6
+      workflows: [planpal-infra-6]
+`);
+
+    const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
+    const registry = runtime.ci?.providerRegistry;
+
+    expect(registry?.list().map((entry) => entry.name)).toEqual(["jenkins-prod", "bitbucket-prod"]);
+    expect(registry?.get("jenkins-prod")?.provider.constructor.name).toBe("JenkinsProvider");
+    expect(registry?.get("bitbucket-prod")?.provider.constructor.name).toBe("BitbucketProvider");
+    expect(registry?.get("jenkins-prod")?.provider).not.toBe(registry?.get("bitbucket-prod")?.provider);
+    expect(registry?.get("jenkins-prod")?.scm?.constructor.name).toBe("JenkinsSCMProvider");
+    expect(registry?.get("bitbucket-prod")?.scm?.constructor.name).toBe("BitbucketSCMProvider");
+    expect(registry?.get("jenkins-prod")?.scm).not.toBe(registry?.get("bitbucket-prod")?.scm);
+    expect(runtime.ci?.provider).toBe(registry?.get("jenkins-prod")?.provider);
+    expect(runtime.ci?.scm).toBe(registry?.get("jenkins-prod")?.scm);
+    expect(runtime.ci?.runtimeMetadata?.name).toBe("jenkins-prod");
+  });
+
   it("wires opt-in SCM and telemetry providers into the loaded capability surface", () => {
     writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}
 ci:

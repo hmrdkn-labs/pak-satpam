@@ -258,6 +258,18 @@ export const RuntimeConfigSchema = z
     }
     if (configuration.ci?.enabled === true) {
       const ci = configuration.ci;
+      const configuredProviders = ci.providers === undefined
+        ? [[ci.provider, { type: ci.provider, github: ci.github, jenkins: ci.jenkins, bitbucket: ci.bitbucket }] as const]
+        : Object.entries(ci.providers);
+      for (const [name, candidate] of configuredProviders) {
+        const providerConfig = candidate.type === "github" ? candidate.github : candidate.type === "jenkins" ? candidate.jenkins : candidate.bitbucket;
+        if (providerConfig === undefined) {
+          context.addIssue({ code: "custom", path: ["ci", "providers", name], message: "provider configuration is required" });
+        }
+        if (candidate.type === "github" && candidate.github?.app === undefined) {
+          context.addIssue({ code: "custom", path: ["ci", "providers", name, "github", "app"], message: "GitHub App configuration is required" });
+        }
+      }
       const selected = ci.providers === undefined || ci.provider_name === undefined
         ? { type: ci.provider, github: ci.github, jenkins: ci.jenkins, bitbucket: ci.bitbucket }
         : ci.providers[ci.provider_name];
@@ -267,7 +279,6 @@ export const RuntimeConfigSchema = z
           context.addIssue({ code: "custom", path: ["ci", selected.type], message: "selected provider configuration is required" });
         }
         if (selected.type === "github") {
-          if (selected.github?.app === undefined) context.addIssue({ code: "custom", path: ["ci", "github", "app"], message: "GitHub App configuration is required" });
           if (ci.approval === undefined) context.addIssue({ code: "custom", path: ["ci", "approval"], message: "approval configuration is required for rerun capability" });
         }
       }
@@ -457,12 +468,9 @@ interface ResolvedCIProvider {
   readonly metadata: CIProviderRuntimeMetadata;
 }
 
-function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
+function resolveCIProviders(configuration: CIConfiguration): readonly ResolvedCIProvider[] {
   if (configuration.providers !== undefined) {
-    const name = configuration.provider_name;
-    const selected = name === undefined ? undefined : configuration.providers[name];
-    if (name === undefined || selected === undefined) throw new Error("Invalid CI runtime configuration");
-    return {
+    return Object.entries(configuration.providers).map(([name, selected]) => ({
       configuration: { name, type: selected.type, github: selected.github, jenkins: selected.jenkins, bitbucket: selected.bitbucket, forensics: selected.forensics },
       metadata: {
         name,
@@ -470,9 +478,9 @@ function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
         capabilities: { read: true, rerun: selected.type === "github" },
         approvalRequired: selected.type === "github",
       },
-    };
+    }));
   }
-  return {
+  return [{
     configuration: { name: configuration.provider, type: configuration.provider, github: configuration.github, jenkins: configuration.jenkins, bitbucket: configuration.bitbucket, forensics: configuration.forensics },
     metadata: {
       name: configuration.provider,
@@ -480,7 +488,15 @@ function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
       capabilities: { read: true, rerun: configuration.provider === "github" },
       approvalRequired: configuration.provider === "github",
     },
-  };
+  }];
+}
+
+function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
+  const selectedName = configuration.providers === undefined ? configuration.provider : configuration.provider_name;
+  if (selectedName === undefined) throw new Error("Invalid CI runtime configuration");
+  const selected = resolveCIProviders(configuration).find((entry) => entry.metadata.name === selectedName);
+  if (selected === undefined) throw new Error("Invalid CI runtime configuration");
+  return selected;
 }
 
 function buildCIConfiguration(
@@ -495,34 +511,23 @@ function buildCIConfiguration(
   const selected = resolveCIProvider(configuration);
   const repositories = configuration.allowlist.map((entry) => entry.repo);
   const clock = options.clock ?? (() => new Date());
-  const provider = selected.configuration.type === "jenkins"
-    ? selected.configuration.jenkins === undefined
-      ? (() => { throw new Error("Invalid CI runtime configuration"); })()
-      : new JenkinsProvider({
-          ...(selected.configuration.jenkins.endpoint === undefined
-            ? { baseUrl: selected.configuration.jenkins.base_url! }
-            : { endpoint: selected.configuration.jenkins.endpoint }),
-          allowInsecureHttp: selected.configuration.jenkins.allow_insecure_http,
-          fetch: options.fetch,
-          providerName: selected.metadata.name,
-          ...(options.clock === undefined ? {} : { clock }),
-          maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
-        })
-    : selected.configuration.type === "bitbucket"
-      ? selected.configuration.bitbucket === undefined
-        ? (() => { throw new Error("Invalid CI runtime configuration"); })()
-        : new BitbucketProvider({
-            ...(selected.configuration.bitbucket.endpoint === undefined
-              ? { baseUrl: selected.configuration.bitbucket.base_url! }
-              : { endpoint: selected.configuration.bitbucket.endpoint }),
-            tokenFile: selected.configuration.bitbucket.token_file,
-            ...(selected.configuration.bitbucket.username === undefined ? {} : { username: selected.configuration.bitbucket.username }),
-            fetch: options.fetch,
-            providerName: selected.metadata.name,
-            ...(options.clock === undefined ? {} : { clock }),
-            maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
-          })
-      : buildGitHubProvider(selected.configuration, repositories, options, clock, configuration.max_freshness_seconds);
+  const built = resolveCIProviders(configuration).map((entry) => {
+    const provider = buildCIProvider(entry, repositories, options, clock, configuration.max_freshness_seconds);
+    const builtForensics = buildForensics(entry.configuration, provider, repositories, options, observabilityProvider, clock);
+    return {
+      name: entry.metadata.name,
+      kind: entry.metadata.type,
+      capabilities: entry.metadata.capabilities.rerun
+        ? APPROVAL_GATED_CI_PROVIDER_CAPABILITIES
+        : READ_ONLY_CI_PROVIDER_CAPABILITIES,
+      provider,
+      ...(builtForensics?.scm === undefined ? {} : { scm: builtForensics.scm }),
+      ...(builtForensics?.forensics === undefined ? {} : { forensics: builtForensics.forensics }),
+    };
+  });
+  const providerRegistry = new CIProviderRegistry(built);
+  const active = providerRegistry.select(selected.metadata.name);
+  const activeProvider = active.provider as CIService["provider"];
   const approval = selected.metadata.approvalRequired
     ? configuration.approval === undefined
       ? (() => { throw new Error("Invalid CI runtime configuration"); })()
@@ -535,24 +540,50 @@ function buildCIConfiguration(
           return new ApprovalTokenService({ key, clock, audit });
         })()
     : undefined;
-  const providerRegistry = new CIProviderRegistry([{
-    name: selected.metadata.name,
-    kind: selected.metadata.type,
-    capabilities: selected.metadata.capabilities.rerun
-      ? APPROVAL_GATED_CI_PROVIDER_CAPABILITIES
-      : READ_ONLY_CI_PROVIDER_CAPABILITIES,
-    provider,
-  }]);
-  const builtForensics = buildForensics(selected.configuration, provider, repositories, options, observabilityProvider, clock);
   return {
-    provider,
+    provider: activeProvider,
     policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
     runtimeMetadata: selected.metadata,
     providerRegistry,
-    ...(builtForensics?.scm === undefined ? {} : { scm: builtForensics.scm }),
-    ...(builtForensics?.forensics === undefined ? {} : { forensics: builtForensics.forensics }),
+    ...(active.scm === undefined ? {} : { scm: active.scm }),
+    ...(active.forensics === undefined ? {} : { forensics: active.forensics }),
     ...(approval === undefined ? {} : { approval }),
   };
+}
+
+function buildCIProvider(
+  selected: ResolvedCIProvider,
+  repositories: readonly string[],
+  options: LoadRuntimeConfigurationOptions,
+  clock: Clock,
+  maxFreshnessSeconds: number,
+): CIService["provider"] {
+  if (selected.configuration.type === "jenkins") {
+    const jenkins = selected.configuration.jenkins;
+    if (jenkins === undefined) throw new Error("Invalid CI runtime configuration");
+    return new JenkinsProvider({
+      ...(jenkins.endpoint === undefined ? { baseUrl: jenkins.base_url! } : { endpoint: jenkins.endpoint }),
+      allowInsecureHttp: jenkins.allow_insecure_http,
+      fetch: options.fetch,
+      providerName: selected.metadata.name,
+      ...(options.clock === undefined ? {} : { clock }),
+      maxFreshnessMs: maxFreshnessSeconds * 1_000,
+    });
+  }
+  if (selected.configuration.type === "bitbucket") {
+    const bitbucket = selected.configuration.bitbucket;
+    if (bitbucket === undefined) throw new Error("Invalid CI runtime configuration");
+    return new BitbucketProvider({
+      ...(bitbucket.endpoint === undefined ? { baseUrl: bitbucket.base_url! } : { endpoint: bitbucket.endpoint }),
+      tokenFile: bitbucket.token_file,
+      ...(bitbucket.username === undefined ? {} : { username: bitbucket.username }),
+      fetch: options.fetch,
+      providerName: selected.metadata.name,
+      ...(options.clock === undefined ? {} : { clock }),
+      maxFreshnessMs: maxFreshnessSeconds * 1_000,
+    });
+  }
+  return buildGitHubProvider(selected.configuration, repositories, options, clock, maxFreshnessSeconds);
 }
 
 function buildForensics(

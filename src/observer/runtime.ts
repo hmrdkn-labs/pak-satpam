@@ -6,12 +6,11 @@ import { redactMetadata } from "../ci/redaction.js";
 import { CIProviderError, type CIProvider } from "../providers/ci-provider.js";
 import { assembleFailureAnalysis, buildAgentNotificationPayload, makeUnavailableFailureAnalysis, type AgentNotificationPayload } from "../ci/forensics.js";
 import type { ForensicsProviderSet } from "../providers/ci-provider.js";
-import { GitHubActionsProvider } from "../providers/github-actions-provider.js";
 import { loadObserverConfiguration, observerRuntimeConfig, readObserverSecretFile, type ObserverConfig } from "./config.js";
-import { MappedGitHubAppTokenProvider } from "../providers/mapped-github-app-token-provider.js";
 import { z } from "zod";
 import { HttpDeliverySink, type ObserverDeliveryRoute, type ObserverDeliverySink } from "./delivery.js";
-import { type ObserverEventSource, type ObserverEventSourceKind, type ObserverRunListInput, type ObserverWebhookRequest } from "./events.js";
+import { observerEventSourceFromProvider, type ObserverEventSource, type ObserverEventSourceKind, type ObserverRunListInput, type ObserverWebhookRequest } from "./events.js";
+import { createObserverEventSourceFromProviderConfiguration, createObserverProviderFromConfiguration } from "./provider-factory.js";
 import { FileObserverStateStore, type ObserverSeenRecord, type ObserverStateDocument, type ObserverStateStore, type ObserverTargetState } from "./state.js";
 
 export type ObserverOutcome = "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "neutral" | "stale" | "unavailable" | "malformed";
@@ -565,19 +564,12 @@ export function createObserverRuntimeFromFiles(options: {
   const hmacKey = readObserverSecretFile(fileConfig.hermes.hmac_key_file);
   const config = observerRuntimeConfig(fileConfig, hmacKey);
   const clock = options.clock ?? (() => new Date());
-  const tokenProvider = MappedGitHubAppTokenProvider.fromFiles({
-    appIdFile: fileConfig.github.app_id_file,
-    pemKeyFile: fileConfig.github.pem_key_file,
-    installations: fileConfig.github.installations.map((entry) => "repo" in entry
-      ? { repo: entry.repo, installationIdFile: entry.installation_id_file }
-      : { owner: entry.owner, installationIdFile: entry.installation_id_file }),
+  const providerConfiguration = { type: "github" as const, github: fileConfig.github, allowlist: config.allowlist };
+  const provider = createObserverProviderFromConfiguration(providerConfiguration, {
     repositories: fileConfig.allowlist.map((entry) => entry.repo),
     fetch: options.fetch,
     clock,
-    apiBaseUrl: fileConfig.github.api_base_url,
-    actionsPermission: "read",
   });
-  const provider = new GitHubActionsProvider({ tokenProvider, fetch: options.fetch, clock, apiBaseUrl: fileConfig.github.api_base_url });
   const state = new FileObserverStateStore({ filePath: config.stateFile, leaseMs: config.leaseMs, clock });
   const delivery = new HttpDeliverySink({
     routes: {
@@ -593,16 +585,11 @@ export function createObserverRuntimeFromFiles(options: {
     backoffMs: config.deliveryBackoffMs,
     timeoutMs: config.deliveryTimeoutMs,
   });
-  const webhookVerifier = fileConfig.github.webhook_secret_file === undefined
-    ? undefined
-    : createGitHubWebhookVerifier(
-      readObserverSecretFile(fileConfig.github.webhook_secret_file),
-      config.allowlist,
-    );
-  const source = {
-    ...observerEventSourceFromProvider(provider),
-    ...(webhookVerifier === undefined ? {} : { webhookVerifier }),
-  };
+  const source = createObserverEventSourceFromProviderConfiguration(
+    providerConfiguration,
+    provider,
+    (secret, allowlist) => createGitHubWebhookVerifier(secret, allowlist),
+  );
   return new ObserverRuntime({ config, provider, source, state, sink: delivery, clock });
 }
 
@@ -670,12 +657,7 @@ function workflowName(run: Record<string, unknown>, workflow: unknown): string |
   return undefined;
 }
 
-export function observerEventSourceFromProvider(provider: ObserverProvider): ObserverEventSource {
-  return {
-    ...(provider.providerClass === undefined ? {} : { providerClass: provider.providerClass }),
-    listTerminalRuns: (input) => provider.listWorkflowRuns(input),
-  };
-}
+export { observerEventSourceFromProvider } from "./events.js";
 
 export function observerEventId(run: Pick<CIWorkflowRun, "repository" | "workflow" | "id" | "runAttempt">): string {
   return `${run.repository}:${run.workflow}:${run.id}:${run.runAttempt}`;

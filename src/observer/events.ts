@@ -1,4 +1,5 @@
 import type { CIWorkflowRun } from "../domain/ci-schemas.js";
+import { CIProviderError } from "../providers/ci-provider.js";
 
 export type ObserverEventSourceKind = "poll" | "webhook";
 
@@ -31,4 +32,21 @@ export interface ObserverEventSource {
   readonly providerClass?: string;
   readonly webhookVerifier?: ObserverWebhookVerifier;
   listTerminalRuns(input: ObserverRunListInput): Promise<ObserverRunListResult>;
+}
+
+export interface ObserverProviderPort {
+  readonly providerClass?: string;
+  readonly ciProviderType?: string;
+  readonly listWorkflowRuns?: (input: ObserverRunListInput) => Promise<ObserverRunListResult>;
+}
+
+/** Build only the observer capabilities the provider actually implements. */
+export function observerEventSourceFromProvider(provider: ObserverProviderPort): ObserverEventSource {
+  const listWorkflowRuns = provider.listWorkflowRuns;
+  return {
+    ...(provider.providerClass === undefined ? {} : { providerClass: provider.providerClass }),
+    listTerminalRuns: listWorkflowRuns === undefined
+      ? async () => { throw new CIProviderError("unsupported"); }
+      : (input) => listWorkflowRuns.call(provider, input),
+  };
 }

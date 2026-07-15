@@ -9,6 +9,10 @@ import { loadObserverConfiguration, observerRuntimeConfig, readObserverSecretFil
 import { MappedGitHubAppTokenProvider } from "../src/providers/mapped-github-app-token-provider.js";
 import { HermesDelivery, isTrustedHermesUrl } from "../src/observer/delivery.js";
 import { createObserverRuntimeFromFiles } from "../src/observer/runtime.js";
+import { observerEventSourceFromProvider } from "../src/observer/events.js";
+import { createObserverProviderFromConfiguration } from "../src/observer/provider-factory.js";
+import { BitbucketProvider } from "../src/providers/bitbucket-provider.js";
+import { JenkinsProvider } from "../src/providers/jenkins-provider.js";
 
 const NOW = new Date("2026-07-14T00:00:00.000Z");
 const SHA = "b".repeat(40);
@@ -33,6 +37,24 @@ describe("observer GitHub run listing", () => {
 });
 
 describe("observer configuration", () => {
+  it.each([
+    ["Jenkins", new JenkinsProvider({ baseUrl: "https://jenkins.example", fetch: globalThis.fetch })],
+    ["Bitbucket Cloud", new BitbucketProvider({ baseUrl: "https://bitbucket.example", token: "observer-user:observer-token", fetch: globalThis.fetch })],
+  ])("fails closed without unimplemented %s observer capabilities", async (_label, provider) => {
+    const source = observerEventSourceFromProvider(provider);
+
+    expect(source.webhookVerifier).toBeUndefined();
+    await expect(source.listTerminalRuns({ repo: "owner/repo", workflow: "ci.yml", page: 1, perPage: 1 })).rejects.toMatchObject({ code: "unsupported" });
+  });
+
+  it.each(["jenkins", "bitbucket"] as const)("does not assemble an unsupported %s observer provider", (type) => {
+    expect(() => createObserverProviderFromConfiguration({ type }, {
+      repositories: ["owner/repo"],
+      fetch: globalThis.fetch,
+      clock: () => NOW,
+    })).toThrowError(expect.objectContaining({ code: "unsupported" }));
+  });
+
   it("permits only Tailscale-literal or exact configured HTTP Hermes hosts", () => {
     const tailscaleHost = [100, 64, 12, 34].join(".");
     const outsideCgnatHost = [100, 128, 0, 1].join(".");

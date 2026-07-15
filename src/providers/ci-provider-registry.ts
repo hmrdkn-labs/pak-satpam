@@ -12,7 +12,9 @@ import {
   CIUnsupportedCapabilityError,
   type CIReadProvider,
   type CIRerunProvider,
+  type ForensicsProviderSet,
 } from "./ci-provider.js";
+import type { SCMReadProvider } from "../scm/provider.js";
 
 const REQUIRED_READ_PORTS = [
   "getWorkflowStatus",
@@ -34,6 +36,8 @@ export interface CIProviderRegistration {
   readonly capabilities: CIProviderCapabilities;
   readonly provider: CIProviderImplementation;
   readonly endpoint?: CIProviderDescriptor["endpoint"];
+  readonly scm?: SCMReadProvider;
+  readonly forensics?: ForensicsProviderSet;
 }
 
 /** Named provider registry with capability checks at the contract boundary. */
@@ -81,6 +85,14 @@ export class CIProviderRegistry {
 
   get(name: string): CIProviderRegistration | undefined {
     return this.#providers.get(name);
+  }
+
+  /** Resolve the explicitly selected provider without selecting by iteration order. */
+  select(name: string): CIProviderRegistration {
+    const providerName = CIProviderNameSchema.parse(name);
+    const registration = this.#providers.get(providerName);
+    if (registration === undefined) throw new CIUnsupportedCapabilityError(providerName, "read");
+    return registration;
   }
 
   list(): readonly CIProviderDescriptor[] {
