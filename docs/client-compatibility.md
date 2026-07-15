@@ -14,9 +14,11 @@ conversation state.
 | OCI | non-root Node image on amd64/arm64 | Buildx and runtime smoke |
 | Inspector | initialization and enabled-tool discovery | inspector:list |
 
-The CI surface contains five base read tools. Optional SCM and telemetry
-configuration adds their read tools. GitHub approval configuration adds the
-non-read-only failed-job rerun. Jenkins and Bitbucket Cloud never add rerun.
+The legacy CI surface contains four read tools plus the GitHub approval-gated
+failed-job rerun, for five tools in the combined and CI-only GitHub profiles.
+Failure analysis, SCM, and telemetry are explicit forensics capabilities and
+are absent unless their providers are configured. Jenkins and Bitbucket Cloud
+never add rerun.
 
 ## Client Rules
 

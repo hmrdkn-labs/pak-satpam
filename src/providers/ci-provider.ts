@@ -63,6 +63,18 @@ export interface ForensicsProviderSet {
   readonly telemetry?: TelemetryCorrelationProvider;
 }
 
+/** A partial or malformed set must never widen the MCP tool surface. */
+export function isForensicsProviderSet(value: unknown): value is ForensicsProviderSet {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  const scm = candidate.scm;
+  const telemetry = candidate.telemetry;
+  if (scm === undefined && telemetry === undefined) return false;
+  if (scm !== undefined && (scm === null || typeof scm !== "object" || typeof (scm as Record<string, unknown>).getChangeEvidence !== "function")) return false;
+  if (telemetry !== undefined && (telemetry === null || typeof telemetry !== "object" || typeof (telemetry as Record<string, unknown>).getTelemetryCorrelation !== "function")) return false;
+  return true;
+}
+
 export class CIUnsupportedCapabilityError extends CIProviderError {
   readonly providerName: CIProviderName;
   readonly capability: CIProviderCapability;

@@ -1,6 +1,6 @@
 {
   "name": "@hmrdkn-labs/pak-satpam",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pak Satpam: bounded observability and approval-gated CI evidence for AI agents",
   "mcpName": "io.github.hmrdkn-labs/pak-satpam",
   "repository": {
@@ -67,6 +67,7 @@
     "test:ci": "vitest run tests/ci-*.test.ts tests/github-actions-provider.test.ts",
     "test:watch": "vitest",
     "test:stdio": "node scripts/stdio-smoke.mjs",
+    "profile:smoke": "node scripts/profile-smoke.mjs",
     "inspector:list": "mcp-inspector --cli node dist/cli.js --method tools/list",
     "audit": "npm audit --audit-level=high",
     "package:dry": "npm pack --dry-run",

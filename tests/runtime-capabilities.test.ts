@@ -8,6 +8,7 @@ import type { CIService } from "../src/ci/service.js";
 import { BitbucketProvider } from "../src/providers/bitbucket-provider.js";
 import { GitHubActionsProvider } from "../src/providers/github-actions-provider.js";
 import { JenkinsProvider } from "../src/providers/jenkins-provider.js";
+import type { ForensicsProviderSet } from "../src/providers/ci-provider.js";
 import { createCIServer } from "../src/server/create-server.js";
 
 const NOW = new Date("2026-07-10T00:00:00.000Z");
@@ -65,7 +66,6 @@ describe("runtime CI capabilities", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.failure_analysis",
     ]);
     expect(tools.every((tool) => tool.description?.includes("jenkins-prod"))).toBe(true);
     expect(tools.some((tool) => tool.description?.includes("GitHub"))).toBe(false);
@@ -88,7 +88,6 @@ describe("runtime CI capabilities", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.failure_analysis",
       "ci.rerun_failed_workflow",
     ]);
     expect(tools.find((tool) => tool.name === "ci.rerun_failed_workflow")?.description).toContain("github-prod");
@@ -110,12 +109,35 @@ describe("runtime CI capabilities", () => {
       },
     });
 
-    expect(tools).toHaveLength(5);
+    expect(tools).toHaveLength(4);
     expect(tools.map((tool) => tool.name)).not.toContain("ci.rerun_failed_workflow");
+  });
+
+  it("fails closed for a partial forensics provider set", async () => {
+    const tools = await listTools({
+      provider: jenkinsProvider(),
+      runtimeMetadata: {
+        name: "jenkins-prod",
+        type: "jenkins",
+        capabilities: { read: true, rerun: false },
+        approvalRequired: false,
+      },
+      forensics: {
+        scm: {} as NonNullable<ForensicsProviderSet["scm"]>,
+        telemetry: { getTelemetryCorrelation: async () => { throw new Error("unreachable"); } },
+      },
+    });
+
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "ci.workflow_status",
+      "ci.failed_job_analysis",
+      "ci.log_evidence",
+      "ci.remediation_plan",
+    ]);
   });
 });
 
-async function listTools(input: Pick<CIService, "provider" | "runtimeMetadata" | "approval">): Promise<readonly { name: string; description?: string | undefined }[]> {
+async function listTools(input: Pick<CIService, "provider" | "runtimeMetadata" | "approval" | "forensics">): Promise<readonly { name: string; description?: string | undefined }[]> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createCIServer({
     ci: {
@@ -123,6 +145,7 @@ async function listTools(input: Pick<CIService, "provider" | "runtimeMetadata" |
       policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
       ...(input.approval === undefined ? {} : { approval: input.approval }),
       ...(input.runtimeMetadata === undefined ? {} : { runtimeMetadata: input.runtimeMetadata }),
+      ...(input.forensics === undefined ? {} : { forensics: input.forensics }),
     },
     clock: () => NOW,
   });

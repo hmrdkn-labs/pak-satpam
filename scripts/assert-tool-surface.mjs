@@ -17,20 +17,36 @@ const CI_TOOLS = [
   "ci.remediation_plan",
   "ci.rerun_failed_workflow",
 ];
+const CI_READ_TOOLS = CI_TOOLS.slice(0, 4);
+const FORENSICS_TOOLS = [
+  "ci.failure_analysis",
+  "ci.scm_change_evidence",
+  "ci.telemetry_correlation",
+];
+const COMBINED_TOOLS = [...BASE_TOOLS, ...CI_TOOLS];
 
 export function assertToolSurface(tools) {
   const names = tools.map((tool) => tool.name);
   const ciNames = names.filter((name) => name.startsWith("ci."));
   assert.deepEqual(names.filter((name) => !name.startsWith("ci.")), BASE_TOOLS);
-  assert(ciNames.length === 0 || ciNames.length === CI_TOOLS.length, `unexpected optional CI tool count: ${ciNames.length}`);
+  assert(ciNames.length === 0 || ciNames.length >= CI_READ_TOOLS.length, `unexpected optional CI tool count: ${ciNames.length}`);
+  assert(ciNames.every((name) => CI_TOOLS.includes(name) || FORENSICS_TOOLS.includes(name)), "unexpected CI tool");
   if (ciNames.length > 0) {
-    assert.deepEqual(ciNames, CI_TOOLS);
+    const legacyNames = ciNames.filter((name) => !FORENSICS_TOOLS.includes(name));
+    assert.deepEqual(legacyNames, legacyNames.includes("ci.rerun_failed_workflow") ? CI_TOOLS : CI_READ_TOOLS);
     const rerun = tools.find((tool) => tool.name === "ci.rerun_failed_workflow");
-    assert.deepEqual(rerun?.annotations, {
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: false,
-    });
+    if (rerun !== undefined) {
+      assert.deepEqual(rerun.annotations, {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      });
+    }
   }
+}
+
+export function assertProfileToolSurface(tools, profile) {
+  const names = tools.map((tool) => tool.name);
+  assert.deepEqual(names, profile === "combined" ? COMBINED_TOOLS : CI_TOOLS);
 }

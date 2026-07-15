@@ -3,6 +3,11 @@
 All notable changes to Pak Satpam are documented here. A changelog entry is not
 a publication receipt.
 
+## [0.2.2] - 2026-07-15
+
+- Restore the private compatibility boundary by keeping ordinary CI read profiles on the legacy five-tool surface and exposing failure analysis only with a validated explicit forensics provider.
+- Fail closed for partial forensics providers while preserving configured SCM and telemetry tools.
+
 ## [0.2.1] - 2026-07-15
 
 - Exclude BuildKit provenance and SPDX SBOM `unknown/unknown` attestation

@@ -87,7 +87,6 @@ describe("private Streamable HTTP transport", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.failure_analysis",
       "ci.rerun_failed_workflow",
     ]);
     expect(tools.tools.every((tool) => tool.name.startsWith("ci."))).toBe(true);

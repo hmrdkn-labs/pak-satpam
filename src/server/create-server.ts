@@ -73,7 +73,7 @@ import {
   type SCMChangeEvidenceInput as DirectSCMChangeEvidenceInput,
 } from "../scm/schemas.js";
 import { assembleFailureAnalysis } from "../ci/forensics.js";
-import { CIProviderError } from "../providers/ci-provider.js";
+import { CIProviderError, isForensicsProviderSet } from "../providers/ci-provider.js";
 import { hasCIReadPorts } from "../providers/ci-provider-registry.js";
 import { CIProviderNameSchema } from "../domain/ci-provider-contracts.js";
 import { assertCIResourceAllowed } from "../ci/policy.js";
@@ -234,8 +234,9 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
   if (metadata === undefined) return;
   const active = ci.providerRegistry?.select(metadata.name);
   const provider = active?.provider ?? ci.provider;
-  const forensics = active?.forensics ?? ci.forensics;
-  const scm = active?.scm ?? ci.scm;
+  const configuredForensics = active === undefined ? ci.forensics : active.forensics;
+  const forensics = isForensicsProviderSet(configuredForensics) ? configuredForensics : undefined;
+  const scm = active === undefined ? ci.scm : active.scm;
   const providerLabel = `${metadata.name} (${metadata.type})`;
   const readCapability = ci.providerRegistry?.supports(metadata.name, "read") ?? metadata.capabilities.read;
   const rerunCapability = ci.providerRegistry?.supports(metadata.name, "rerun") ?? metadata.capabilities.rerun;
@@ -281,6 +282,9 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
       },
       async (input) => ciRead(ci, "ci.remediation_plan", input, CIRemediationPlanResultSchema, clock, () => provider.getRemediationPlan(input)),
     );
+  }
+
+  if (readCapability && forensics !== undefined) {
     server.registerTool(
       "ci.failure_analysis",
       {
@@ -289,7 +293,7 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
         outputSchema: CIFailureAnalysisResultSchema,
         annotations: READ_ONLY_ANNOTATIONS,
       },
-      async (input) => ciRead(ci, "ci.failure_analysis", input, CIFailureAnalysisResultSchema, clock, () => assembleFailureAnalysis({ provider, ...(forensics === undefined ? {} : { evidence: forensics }), input, clock })),
+      async (input) => ciRead(ci, "ci.failure_analysis", input, CIFailureAnalysisResultSchema, clock, () => assembleFailureAnalysis({ provider, evidence: forensics, input, clock })),
     );
   }
 

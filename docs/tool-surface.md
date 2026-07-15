@@ -46,16 +46,17 @@ against an exact repository/workflow allowlist.
 | ci.failed_job_analysis | deterministic build/test/lint/dependency/deployment/connectivity/permission/unknown categories |
 | ci.log_evidence | one job's redacted log evidence, at most 200 lines |
 | ci.remediation_plan | deterministic dryRun true steps linked to docs/ci-cd-runbook.md |
-| ci.failure_analysis | bounded CI, SCM, and telemetry evidence with non-causal correlations |
+| ci.failure_analysis | bounded CI, SCM, and telemetry evidence with non-causal correlations when forensics is configured |
 | ci.scm_change_evidence | direct provider-neutral SCM evidence with six budgets |
 | ci.telemetry_correlation | bounded named telemetry correlation when configured |
 | ci.rerun_failed_workflow | GitHub-only failed-job rerun after fresh one-time approval |
 
-The first five read tools are available for every enabled runtime provider. SCM
-and telemetry tools are opt-in configuration. Failure analysis remains
-read-only even when the rerun tool is available. The rerun is absent for
-Jenkins and Bitbucket Cloud. Bitbucket Data Center is contract-only and is not
-an enabled runtime provider; it exposes no tools.
+The four CI read tools are available for every enabled runtime provider. The
+legacy GitHub profile has five CI tools when approval-gated rerun is configured.
+Failure analysis, SCM, and telemetry are opt-in forensics capabilities and
+remain read-only. The rerun is absent for Jenkins and Bitbucket Cloud.
+Bitbucket Data Center is contract-only and is not an enabled runtime provider;
+it exposes no tools.
 
 ## SCM Contract
 

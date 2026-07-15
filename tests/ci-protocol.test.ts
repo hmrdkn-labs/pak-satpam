@@ -52,7 +52,7 @@ async function connectedServer(fetch: typeof globalThis.fetch) {
 }
 
 describe("CI MCP contract", () => {
-  it("registers the four read tools plus one mutating rerun tool only when configured", async () => {
+  it("preserves the twelve-tool combined surface without forensics", async () => {
     const fetch = viFetch([
       new Response(JSON.stringify({ workflow_runs: [] }), { headers: { "content-type": "application/json" } }),
     ]);
@@ -70,7 +70,6 @@ describe("CI MCP contract", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.failure_analysis",
       "ci.rerun_failed_workflow",
     ]);
     expect(result.tools.find((tool) => tool.name === "ci.rerun_failed_workflow")?.annotations).toMatchObject({
@@ -96,7 +95,6 @@ describe("CI MCP contract", () => {
       "ci.failed_job_analysis",
       "ci.log_evidence",
       "ci.remediation_plan",
-      "ci.failure_analysis",
       "ci.rerun_failed_workflow",
     ]);
     expect(result.tools.every((tool) => tool.name.startsWith("ci."))).toBe(true);
@@ -182,7 +180,7 @@ describe("CI MCP contract", () => {
     await server.close();
   });
 
-  it("registers optional SCM and telemetry tools only when capabilities are declared", async () => {
+  it("registers failure analysis plus optional SCM and telemetry only with forensics", async () => {
     const configured = ci(viFetch([]), {
       scm: { getChangeEvidence: vi.fn() },
       telemetry: { getTelemetryCorrelation: vi.fn() },
