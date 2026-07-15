@@ -120,7 +120,7 @@ export class BitbucketProvider implements CIProvider {
       available: true,
       lines,
       sha256: createHash("sha256").update(lines.map((line) => line.text).join("\n")).digest("hex"),
-    }, { truncated: rawLines.length > selected.length, redactionsApplied: selected.some((line) => line.redacted) }));
+    }, { truncated: rawLines.length > selected.length || selected.some((line) => line.truncated), redactionsApplied: selected.some((line) => line.redactionsApplied) }));
   }
 
   async getRemediationPlan(input: CIRemediationPlanInput): Promise<CIRemediationPlanResult> {

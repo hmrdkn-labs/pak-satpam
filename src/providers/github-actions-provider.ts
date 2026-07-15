@@ -121,7 +121,7 @@ export class GitHubActionsProvider implements CIProvider {
     const rawLines = raw.split(/\r?\n/).filter((line) => line.length > 0);
     const selected = rawLines.slice(0, input.maxLines).map((line, index) => ({ sequence: index + 1, ...redactText(line) }));
     const lines = selected.map(({ sequence, text }) => ({ sequence, text }));
-    const redactionsApplied = selected.some((line) => line.redacted);
+    const redactionsApplied = selected.some((line) => line.redactionsApplied);
     return CILogEvidenceResultSchema.parse(makeCIEvidence(this.#providerName, this.#clock(), {
       runId: input.runId,
       jobId: input.jobId,
@@ -129,7 +129,7 @@ export class GitHubActionsProvider implements CIProvider {
       available: true,
       lines,
       sha256: createHash("sha256").update(lines.map((line) => line.text).join("\n")).digest("hex"),
-    }, { truncated: rawLines.length > input.maxLines, redactionsApplied }));
+    }, { truncated: rawLines.length > input.maxLines || selected.some((line) => line.truncated), redactionsApplied }));
   }
 
   async getRemediationPlan(input: { repo: string; workflow: string; runId: string }) {

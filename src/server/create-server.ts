@@ -337,7 +337,7 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
     );
   }
 
-  if (readCapability && rerunCapability && metadata.type === "github" && ci.approval !== undefined) {
+  if (ci.enableRerunTool === true && readCapability && rerunCapability && metadata.type === "github" && ci.approval !== undefined) {
     server.registerTool(
       "ci.rerun_failed_workflow",
       {

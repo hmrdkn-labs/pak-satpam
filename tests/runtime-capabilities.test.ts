@@ -71,7 +71,7 @@ describe("runtime CI capabilities", () => {
     expect(tools.some((tool) => tool.description?.includes("GitHub"))).toBe(false);
   });
 
-  it("registers rerun only for a real GitHub provider with declared capability and approval", async () => {
+  it("registers rerun only when explicitly enabled for a real GitHub provider", async () => {
     const tools = await listTools({
       provider: new GitHubActionsProvider({ token: "github-token-for-runtime-test", fetch: globalThis.fetch }),
       runtimeMetadata: {
@@ -81,6 +81,7 @@ describe("runtime CI capabilities", () => {
         approvalRequired: true,
       },
       approval: approval(),
+      enableRerunTool: true,
     });
 
     expect(tools.map((tool) => tool.name)).toEqual([
@@ -136,8 +137,7 @@ describe("runtime CI capabilities", () => {
     ]);
   });
 });
-
-async function listTools(input: Pick<CIService, "provider" | "runtimeMetadata" | "approval" | "forensics">): Promise<readonly { name: string; description?: string | undefined }[]> {
+async function listTools(input: Pick<CIService, "provider" | "runtimeMetadata" | "approval" | "forensics" | "enableRerunTool">): Promise<readonly { name: string; description?: string | undefined }[]> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createCIServer({
     ci: {
@@ -146,6 +146,7 @@ async function listTools(input: Pick<CIService, "provider" | "runtimeMetadata" |
       ...(input.approval === undefined ? {} : { approval: input.approval }),
       ...(input.runtimeMetadata === undefined ? {} : { runtimeMetadata: input.runtimeMetadata }),
       ...(input.forensics === undefined ? {} : { forensics: input.forensics }),
+      ...(input.enableRerunTool === undefined ? {} : { enableRerunTool: input.enableRerunTool }),
     },
     clock: () => NOW,
   });

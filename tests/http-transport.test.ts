@@ -64,6 +64,7 @@ describe("private Streamable HTTP transport", () => {
         policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
         runtimeMetadata: { name: "github-http-test", type: "github", capabilities: { read: true, rerun: true }, approvalRequired: true },
         approval: new ApprovalTokenService({ key: Buffer.from("c".repeat(32)), clock: () => FIXED_NOW, audit: new InMemoryApprovalAuditStore() }),
+        enableRerunTool: true,
       },
       bearerToken: TEST_CREDENTIAL,
       host: "127.0.0.1",

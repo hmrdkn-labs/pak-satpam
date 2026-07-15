@@ -109,7 +109,12 @@ const CIProviderBaseUrlSchema = z.string().min(1).max(2_048).url().refine((value
   return (url.protocol === "http:" || url.protocol === "https:") && url.username === "" && url.password === "" && url.search === "" && url.hash === "";
 }, "must be an HTTP(S) base URL without credentials, query, or fragment");
 const JenkinsConfigSchema = z
-  .object({ base_url: CIProviderBaseUrlSchema.optional(), endpoint: CIProviderEndpointSchema.optional(), allow_insecure_http: z.boolean().default(false) })
+  .object({
+    base_url: CIProviderBaseUrlSchema.optional(),
+    endpoint: CIProviderEndpointSchema.optional(),
+    allow_insecure_http: z.boolean().default(false),
+    enable_rerun_tool: z.boolean().default(false),
+  })
   .strict()
   .superRefine((value, context) => {
     if ((value.base_url === undefined) === (value.endpoint === undefined)) {
@@ -122,7 +127,13 @@ const JenkinsConfigSchema = z
     }
   });
 const BitbucketConfigSchema = z
-  .object({ base_url: CIProviderBaseUrlSchema.optional(), endpoint: CIProviderEndpointSchema.optional(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
+  .object({
+    base_url: CIProviderBaseUrlSchema.optional(),
+    endpoint: CIProviderEndpointSchema.optional(),
+    token_file: z.string().min(1).max(1_024),
+    username: z.string().min(1).max(256).optional(),
+    enable_rerun_tool: z.boolean().default(false),
+  })
   .strict()
   .superRefine((value, context) => {
     if ((value.base_url === undefined) === (value.endpoint === undefined)) {
@@ -136,6 +147,7 @@ const GitHubConfigSchema = z
     api_base_url: CIProviderBaseUrlSchema.optional(),
     api_endpoint: CIProviderEndpointSchema.optional(),
     app: GitHubAppSchema.optional(),
+    enable_rerun_tool: z.boolean().default(false),
   })
   .strict()
   .superRefine((value, context) => {
@@ -462,6 +474,7 @@ interface ResolvedCIProviderConfiguration {
   readonly jenkins?: CIConfiguration["jenkins"];
   readonly bitbucket?: CIConfiguration["bitbucket"];
   readonly forensics?: CIConfiguration["forensics"];
+  readonly enableRerunTool: boolean;
 }
 
 interface ResolvedCIProvider {
@@ -472,7 +485,15 @@ interface ResolvedCIProvider {
 function resolveCIProviders(configuration: CIConfiguration): readonly ResolvedCIProvider[] {
   if (configuration.providers !== undefined) {
     return Object.entries(configuration.providers).map(([name, selected]) => ({
-      configuration: { name, type: selected.type, github: selected.github, jenkins: selected.jenkins, bitbucket: selected.bitbucket, forensics: selected.forensics },
+      configuration: {
+        name,
+        type: selected.type,
+        github: selected.github,
+        jenkins: selected.jenkins,
+        bitbucket: selected.bitbucket,
+        forensics: selected.forensics,
+        enableRerunTool: providerRerunOptIn(selected),
+      },
       metadata: {
         name,
         type: selected.type,
@@ -482,7 +503,15 @@ function resolveCIProviders(configuration: CIConfiguration): readonly ResolvedCI
     }));
   }
   return [{
-    configuration: { name: configuration.provider, type: configuration.provider, github: configuration.github, jenkins: configuration.jenkins, bitbucket: configuration.bitbucket, forensics: configuration.forensics },
+    configuration: {
+      name: configuration.provider,
+      type: configuration.provider,
+      github: configuration.github,
+      jenkins: configuration.jenkins,
+      bitbucket: configuration.bitbucket,
+      forensics: configuration.forensics,
+      enableRerunTool: providerRerunOptIn({ type: configuration.provider, github: configuration.github, jenkins: configuration.jenkins, bitbucket: configuration.bitbucket }),
+    },
     metadata: {
       name: configuration.provider,
       type: configuration.provider,
@@ -490,6 +519,16 @@ function resolveCIProviders(configuration: CIConfiguration): readonly ResolvedCI
       approvalRequired: configuration.provider === "github",
     },
   }];
+}
+
+function providerRerunOptIn(configuration: {
+  readonly type: CIProviderType;
+  readonly github?: CIConfiguration["github"];
+  readonly jenkins?: CIConfiguration["jenkins"];
+  readonly bitbucket?: CIConfiguration["bitbucket"];
+}): boolean {
+  const selected = configuration.type === "github" ? configuration.github : configuration.type === "jenkins" ? configuration.jenkins : configuration.bitbucket;
+  return selected?.enable_rerun_tool === true;
 }
 
 function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
@@ -545,6 +584,7 @@ function buildCIConfiguration(
     provider: activeProvider,
     policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
     runtimeMetadata: selected.metadata,
+    enableRerunTool: selected.configuration.enableRerunTool,
     providerRegistry,
     ...(active.scm === undefined ? {} : { scm: active.scm }),
     ...(active.forensics === undefined ? {} : { forensics: active.forensics }),

@@ -242,6 +242,21 @@ describe("GitHub Actions adapter", () => {
     );
     expect(fetch.mock.calls.at(-1)?.[1]).not.toHaveProperty("headers");
   });
+  it("reports secret redaction separately from excerpt truncation", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response("x".repeat(1_500), { headers: { "content-type": "text/plain" } }));
+    const logs = await provider(fetch).getLogEvidence({
+      repo: "owner/repo",
+      workflow: "goal14-controlled-fixture.yml",
+      runId: "101",
+      jobId: "9",
+      maxLines: 1,
+    });
+
+    expect(logs.redactionsApplied).toBe(false);
+    expect(logs.truncated).toBe(true);
+    expect(logs.data.lines[0]?.text).toContain("[TRUNCATED]");
+  });
 
   it("rejects an untrusted GitHub API base URL", () => {
     expect(() => new GitHubActionsProvider({

@@ -12,22 +12,27 @@ const SECRET_PATTERNS: readonly RegExp[] = [
 
 export interface RedactedText {
   readonly text: string;
+  /** True when a secret was replaced or the value was shortened. */
   readonly redacted: boolean;
+  /** True only when a secret pattern was replaced. */
+  readonly redactionsApplied: boolean;
+  readonly truncated: boolean;
 }
 
 export function redactText(input: string, maxLength = 1_024): RedactedText {
   let text = input;
-  let redacted = false;
+  let redactionsApplied = false;
   for (const pattern of SECRET_PATTERNS) {
     const next = text.replace(pattern, "[REDACTED]");
-    redacted ||= next !== text;
+    redactionsApplied ||= next !== text;
     text = next;
   }
+  let truncated = false;
   if (text.length > maxLength) {
     text = `${text.slice(0, Math.max(0, maxLength - 15))}...[TRUNCATED]`;
-    redacted = true;
+    truncated = true;
   }
-  return { text, redacted };
+  return { text, redacted: redactionsApplied || truncated, redactionsApplied, truncated };
 }
 
 export function redactMetadata(value: unknown): unknown {
