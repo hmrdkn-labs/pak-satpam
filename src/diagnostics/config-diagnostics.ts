@@ -4,6 +4,8 @@ import { parse as parseYaml } from "yaml";
 import {
   parseRuntimeConfiguration,
   RUNTIME_PROFILES,
+  runtimeProviderMetadata,
+  type RuntimeProviderMetadata,
   type RuntimeConfiguration,
   type RuntimeProfile,
 } from "../runtime/load-runtime-configuration.js";
@@ -34,6 +36,7 @@ export interface RuntimeDiagnostic {
 export interface RuntimeConfigurationDiagnostic {
   readonly ok: boolean;
   readonly profile?: RuntimeProfile;
+  readonly runtimeMetadata?: RuntimeProviderMetadata;
   readonly diagnostics: readonly RuntimeDiagnostic[];
 }
 
@@ -64,18 +67,19 @@ export function diagnoseRuntimeConfiguration(
   }
 
   const profile = configuration.profile;
+  const runtimeMetadata = runtimeProviderMetadata(configuration);
   const profileDiagnostics: RuntimeDiagnostic[] = [];
   appendFileDiagnostic(profileDiagnostics, inspectSecretFile(options.mcpTokenPath, MIN_MCP_TOKEN_BYTES), "mcp");
   if (profile !== "ci-only") {
     appendFileDiagnostic(profileDiagnostics, inspectSecretFile(options.grafanaTokenPath, MIN_MCP_TOKEN_BYTES), "grafana");
   }
   if (profile === "ci-only" || profile === "combined") {
-    inspectCIFiles(configuration, profileDiagnostics);
+    inspectCIFiles(configuration, profileDiagnostics, runtimeMetadata.ci);
   }
 
   diagnostics.push(...profileDiagnostics);
   if (diagnostics.length === 0) diagnostics.push({ code: "RUNTIME_CONFIG_OK", severity: "info" });
-  return { ok: diagnostics.every((diagnostic) => diagnostic.severity !== "error"), profile, diagnostics };
+  return { ok: diagnostics.every((diagnostic) => diagnostic.severity !== "error"), profile, runtimeMetadata, diagnostics };
 }
 
 function inspectConfigFile(path: string): FileStatus {
@@ -101,13 +105,16 @@ function inspectSecretFile(path: string | undefined, minimumBytes: number): File
   }
 }
 
-function inspectCIFiles(configuration: RuntimeConfiguration, diagnostics: RuntimeDiagnostic[]): void {
+function inspectCIFiles(configuration: RuntimeConfiguration, diagnostics: RuntimeDiagnostic[], metadata: RuntimeProviderMetadata["ci"]): void {
   const ci = configuration.ci;
   if (ci === undefined) return;
+  const selected = ci.providers === undefined || ci.provider_name === undefined
+    ? ci
+    : ci.providers[ci.provider_name];
   const files: Array<{ path: string; minimumBytes: number }> = [];
-  if (ci.approval !== undefined) files.push({ path: ci.approval.key_file, minimumBytes: MIN_CI_KEY_BYTES });
-  if (ci.provider === "bitbucket" && ci.bitbucket !== undefined) files.push({ path: ci.bitbucket.token_file, minimumBytes: 1 });
-  const app = ci.github?.app;
+  if (metadata?.type === "github" && ci.approval !== undefined) files.push({ path: ci.approval.key_file, minimumBytes: MIN_CI_KEY_BYTES });
+  if (metadata?.type === "bitbucket" && selected?.bitbucket !== undefined) files.push({ path: selected.bitbucket.token_file, minimumBytes: 1 });
+  const app = selected?.github?.app;
   if (app !== undefined) {
     files.push({ path: app.app_id_file, minimumBytes: 1 }, { path: app.pem_key_file, minimumBytes: 1 });
     if (app.installation_id_file !== undefined) files.push({ path: app.installation_id_file, minimumBytes: 1 });

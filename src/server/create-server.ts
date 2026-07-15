@@ -58,7 +58,7 @@ import {
 } from "../domain/ci-schemas.js";
 import { CIProviderError } from "../providers/ci-provider.js";
 import { assertCIResourceAllowed } from "../ci/policy.js";
-import type { CIService } from "../ci/service.js";
+import type { CIProviderRuntimeMetadata, CIService } from "../ci/service.js";
 import { VERSION } from "../version.js";
 
 const PANEL_MAX_BYTES = 4 * 1_024 * 1_024;
@@ -211,61 +211,90 @@ export function createCIServer(options: CreateCIServerOptions): McpServer {
 }
 
 function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
-  server.registerTool(
-    "ci.workflow_status",
-    {
-      description: "Return bounded status for one allowlisted GitHub Actions workflow.",
-      inputSchema: CIWorkflowStatusInputSchema,
-      outputSchema: CIWorkflowStatusResultSchema,
-      annotations: READ_ONLY_ANNOTATIONS,
-    },
-    async (input) => ciRead(ci, "ci.workflow_status", input, CIWorkflowStatusResultSchema, clock, () => ci.provider.getWorkflowStatus(input)),
-  );
-  server.registerTool(
-    "ci.failed_job_analysis",
-    {
-      description: "Classify failed or cancelled jobs from one allowlisted workflow run.",
-      inputSchema: CIFailedJobAnalysisInputSchema,
-      outputSchema: CIFailedJobAnalysisResultSchema,
-      annotations: READ_ONLY_ANNOTATIONS,
-    },
-    async (input) => ciRead(ci, "ci.failed_job_analysis", input, CIFailedJobAnalysisResultSchema, clock, () => ci.provider.getFailedJobAnalysis(input)),
-  );
-  server.registerTool(
-    "ci.log_evidence",
-    {
-      description: "Return bounded, redacted log evidence for one allowlisted failed job.",
-      inputSchema: CILogEvidenceInputSchema,
-      outputSchema: CILogEvidenceResultSchema,
-      annotations: READ_ONLY_ANNOTATIONS,
-    },
-    async (input) => ciRead(ci, "ci.log_evidence", input, CILogEvidenceResultSchema, clock, () => ci.provider.getLogEvidence(input)),
-  );
-  server.registerTool(
-    "ci.remediation_plan",
-    {
-      description: "Return a deterministic, non-mutating remediation plan from failed-job classes.",
-      inputSchema: CIRemediationPlanInputSchema,
-      outputSchema: CIRemediationPlanResultSchema,
-      annotations: READ_ONLY_ANNOTATIONS,
-    },
-    async (input) => ciRead(ci, "ci.remediation_plan", input, CIRemediationPlanResultSchema, clock, () => ci.provider.getRemediationPlan(input)),
-  );
-  server.registerTool(
-    "ci.rerun_failed_workflow",
-    {
-      description: "With operator approval, rerun failed jobs for one failed or cancelled allowlisted run.",
-      inputSchema: CIRerunFailedWorkflowInputSchema,
-      outputSchema: CIRerunFailedWorkflowResultSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: false,
-        openWorldHint: false,
+  const metadata = validRuntimeMetadata(ci);
+  if (metadata === undefined) return;
+  const provider = ci.provider;
+  const providerLabel = `${metadata.name} (${metadata.type})`;
+
+  if (metadata.capabilities.read) {
+    server.registerTool(
+      "ci.workflow_status",
+      {
+        description: `Return bounded status from configured CI provider ${providerLabel} for one allowlisted workflow.`,
+        inputSchema: CIWorkflowStatusInputSchema,
+        outputSchema: CIWorkflowStatusResultSchema,
+        annotations: READ_ONLY_ANNOTATIONS,
       },
-    },
-    async (input) => rerunFailedWorkflow(ci, input, clock),
-  );
+      async (input) => ciRead(ci, "ci.workflow_status", input, CIWorkflowStatusResultSchema, clock, () => provider.getWorkflowStatus(input)),
+    );
+    server.registerTool(
+      "ci.failed_job_analysis",
+      {
+        description: `Classify failed or cancelled jobs from configured CI provider ${providerLabel}.`,
+        inputSchema: CIFailedJobAnalysisInputSchema,
+        outputSchema: CIFailedJobAnalysisResultSchema,
+        annotations: READ_ONLY_ANNOTATIONS,
+      },
+      async (input) => ciRead(ci, "ci.failed_job_analysis", input, CIFailedJobAnalysisResultSchema, clock, () => provider.getFailedJobAnalysis(input)),
+    );
+    server.registerTool(
+      "ci.log_evidence",
+      {
+        description: `Return bounded, redacted log evidence from configured CI provider ${providerLabel}.`,
+        inputSchema: CILogEvidenceInputSchema,
+        outputSchema: CILogEvidenceResultSchema,
+        annotations: READ_ONLY_ANNOTATIONS,
+      },
+      async (input) => ciRead(ci, "ci.log_evidence", input, CILogEvidenceResultSchema, clock, () => provider.getLogEvidence(input)),
+    );
+    server.registerTool(
+      "ci.remediation_plan",
+      {
+        description: `Return a deterministic, non-mutating remediation plan from configured CI provider ${providerLabel}.`,
+        inputSchema: CIRemediationPlanInputSchema,
+        outputSchema: CIRemediationPlanResultSchema,
+        annotations: READ_ONLY_ANNOTATIONS,
+      },
+      async (input) => ciRead(ci, "ci.remediation_plan", input, CIRemediationPlanResultSchema, clock, () => provider.getRemediationPlan(input)),
+    );
+  }
+
+  if (metadata.capabilities.read && metadata.capabilities.rerun && metadata.type === "github" && ci.approval !== undefined) {
+    server.registerTool(
+      "ci.rerun_failed_workflow",
+      {
+        description: `With operator approval, rerun failed jobs through configured CI provider ${providerLabel}.`,
+        inputSchema: CIRerunFailedWorkflowInputSchema,
+        outputSchema: CIRerunFailedWorkflowResultSchema,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async (input) => rerunFailedWorkflow(ci, input, clock),
+    );
+  }
+}
+
+function validRuntimeMetadata(ci: CIService): CIProviderRuntimeMetadata | undefined {
+  const metadata = ci.runtimeMetadata;
+  if (metadata === undefined || metadata.name.trim().length === 0) return undefined;
+  const providerType = providerTypeForImplementation(ci.provider);
+  if (providerType === undefined || providerType !== metadata.type) return undefined;
+  if (metadata.capabilities.read !== true && metadata.capabilities.rerun !== true) return undefined;
+  if (metadata.approvalRequired !== (metadata.type === "github" && metadata.capabilities.rerun)) return undefined;
+  return metadata;
+}
+
+function providerTypeForImplementation(provider: CIService["provider"]): CIProviderRuntimeMetadata["type"] | undefined {
+  switch (provider.constructor.name) {
+    case "GitHubActionsProvider": return "github";
+    case "JenkinsProvider": return "jenkins";
+    case "BitbucketProvider": return "bitbucket";
+    default: return undefined;
+  }
 }
 
 async function ciRead<TInput extends CIWorkflowStatusInput | CIFailedJobAnalysisInput | CILogEvidenceInput | CIRemediationPlanInput>(
@@ -278,58 +307,60 @@ async function ciRead<TInput extends CIWorkflowStatusInput | CIFailedJobAnalysis
 ): Promise<CallToolResult> {
   const auditBase = { event: "ci_read", tool, repo: input.repo, workflow: input.workflow, ...(input.runId === undefined ? {} : { runId: input.runId }), at: clock().toISOString() };
   if (!allowedCIInput(ci, input)) {
-    try { ci.approval.audit({ ...auditBase, outcome: "policy_denied" }); } catch { return ciError("ci_audit_unavailable"); }
+    try { ci.approval?.audit({ ...auditBase, outcome: "policy_denied" }); } catch { return ciError("ci_audit_unavailable"); }
     return ciError("ci_policy_denied");
   }
   try {
     const result = schema.parse(await operation());
-    ci.approval.audit({ ...auditBase, outcome: "success" });
+    ci.approval?.audit({ ...auditBase, outcome: "success" });
     return structuredResult(result);
   } catch (error) {
-    try { ci.approval.audit({ ...auditBase, outcome: "provider_failure" }); } catch { return ciError("ci_audit_unavailable"); }
+    try { ci.approval?.audit({ ...auditBase, outcome: "provider_failure" }); } catch { return ciError("ci_audit_unavailable"); }
     return ciProviderError(error);
   }
 }
 
 async function rerunFailedWorkflow(ci: CIService, input: CIRerunFailedWorkflowInput, clock: Clock): Promise<CallToolResult> {
+  const approvalService = ci.approval;
+  if (approvalService === undefined) return ciError("ci_capability_denied");
   if (!allowedCIInput(ci, input)) {
-    ci.approval.audit({ event: "ci_rerun", outcome: "policy_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+    approvalService.audit({ event: "ci_rerun", outcome: "policy_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
     return ciError("ci_policy_denied");
   }
-  const approval = ci.approval.verifyAndConsume(input.approvalToken, input);
+  const approval = approvalService.verifyAndConsume(input.approvalToken, input);
   if (!approval.ok) {
-    ci.approval.audit({ event: "ci_rerun", outcome: "approval_denied", code: approval.code, repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+    approvalService.audit({ event: "ci_rerun", outcome: "approval_denied", code: approval.code, repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
     return ciError(`approval_${approval.code}`);
   }
-  const releaseLease = ci.approval.acquireActionLease(input);
+  const releaseLease = approvalService.acquireActionLease(input);
   if (releaseLease === undefined) {
-    ci.approval.audit({ event: "ci_rerun", outcome: "action_in_progress", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+    approvalService.audit({ event: "ci_rerun", outcome: "action_in_progress", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
     return ciError("ci_action_in_progress");
   }
   try {
     const status = await ci.provider.getWorkflowStatus({ repo: input.repo, workflow: input.workflow, runId: input.runId });
     if (status.freshness !== "fresh") {
-      ci.approval.audit({ event: "ci_rerun", outcome: "stale_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+      approvalService.audit({ event: "ci_rerun", outcome: "stale_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
       return ciError("ci_stale_run");
     }
     if (status.data.run.conclusion !== "failure" && status.data.run.conclusion !== "cancelled") {
-      ci.approval.audit({ event: "ci_rerun", outcome: "eligibility_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+      approvalService.audit({ event: "ci_rerun", outcome: "eligibility_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
       return ciError("ci_run_not_failed_or_cancelled");
     }
     if (status.data.run.runAttempt !== input.runAttempt || status.data.run.sha !== input.headSha) {
-      ci.approval.audit({ event: "ci_rerun", outcome: "run_binding_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+      approvalService.audit({ event: "ci_rerun", outcome: "run_binding_denied", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
       return ciError("ci_run_binding_changed");
     }
-    ci.approval.audit({ event: "ci_rerun", outcome: "action_started", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString(), action: "rerun-failed-jobs" });
+    approvalService.audit({ event: "ci_rerun", outcome: "action_started", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString(), action: "rerun-failed-jobs" });
     const result = await ci.provider.rerunFailedWorkflow(input);
     const normalized = CIRerunFailedWorkflowResultSchema.parse({
       ...result,
       data: { ...result.data, requestId: input.requestId },
     });
-    ci.approval.audit({ event: "ci_rerun", outcome: "success", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString(), action: "rerun-failed-jobs" });
+    approvalService.audit({ event: "ci_rerun", outcome: "success", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString(), action: "rerun-failed-jobs" });
     return structuredResult(normalized);
   } catch (error) {
-    ci.approval.audit({ event: "ci_rerun", outcome: "provider_failure", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
+    approvalService.audit({ event: "ci_rerun", outcome: "provider_failure", repo: input.repo, workflow: input.workflow, runId: input.runId, requestId: input.requestId, at: clock().toISOString() });
     return ciProviderError(error);
   } finally {
     releaseLease();

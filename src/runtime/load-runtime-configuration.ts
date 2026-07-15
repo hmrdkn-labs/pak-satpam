@@ -16,7 +16,7 @@ import { BitbucketProvider } from "../providers/bitbucket-provider.js";
 import { CIRepositorySchema, CIWorkflowSchema } from "../domain/ci-schemas.js";
 import { ApprovalTokenService, FileApprovalAuditStore } from "../ci/approval.js";
 import { createCIAllowlist } from "../ci/policy.js";
-import type { CIService } from "../ci/service.js";
+import type { CIProviderRuntimeMetadata, CIService, CIProviderType } from "../ci/service.js";
 import { GitHubActionsProvider } from "../providers/github-actions-provider.js";
 import { GitHubAppTokenProvider } from "../providers/github-app-token-provider.js";
 import { MappedGitHubAppTokenProvider } from "../providers/mapped-github-app-token-provider.js";
@@ -90,26 +90,39 @@ const GitHubAppSchema = z
       context.addIssue({ code: "custom", path: ["installations"], message: "configure one installation mode" });
     }
   });
+const CIProviderTypeSchema = z.enum(["github", "jenkins", "bitbucket"]);
+const JenkinsConfigSchema = z.object({ base_url: z.url() }).strict();
+const BitbucketConfigSchema = z
+  .object({ base_url: z.url(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
+  .strict();
+const GitHubConfigSchema = z
+  .object({
+    api_base_url: z.literal("https://api.github.com").default("https://api.github.com"),
+    app: GitHubAppSchema.optional(),
+  })
+  .strict();
+const NamedCIProviderSchema = z
+  .object({
+    type: CIProviderTypeSchema,
+    github: GitHubConfigSchema.optional(),
+    jenkins: JenkinsConfigSchema.optional(),
+    bitbucket: BitbucketConfigSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const configured = value.type === "github" ? value.github : value.type === "jenkins" ? value.jenkins : value.bitbucket;
+    if (configured === undefined) context.addIssue({ code: "custom", path: [value.type], message: "provider configuration is required" });
+  });
 const CIConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
-    provider: z.enum(["github", "jenkins", "bitbucket"]).default("github"),
+    provider: CIProviderTypeSchema.default("github"),
+    provider_name: LogicalIdSchema.optional(),
+    providers: z.record(LogicalIdSchema, NamedCIProviderSchema).refine((providers) => Object.keys(providers).length <= 20).optional(),
     allowlist: z.array(CIAllowlistEntrySchema).max(100).default([]),
-    github: z
-      .object({
-        api_base_url: z.literal("https://api.github.com").default("https://api.github.com"),
-        app: GitHubAppSchema.optional(),
-      })
-      .strict()
-      .optional(),
-    jenkins: z
-      .object({ base_url: z.url() })
-      .strict()
-      .optional(),
-    bitbucket: z
-      .object({ base_url: z.url(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
-      .strict()
-      .optional(),
+    github: GitHubConfigSchema.optional(),
+    jenkins: JenkinsConfigSchema.optional(),
+    bitbucket: BitbucketConfigSchema.optional(),
     approval: z
       .object({
         key_file: z.string().min(1).max(1_024),
@@ -158,6 +171,31 @@ export const RuntimeConfigSchema = z
     if ((configuration.profile === "ci-only" || configuration.profile === "combined") && configuration.ci?.enabled !== true) {
       context.addIssue({ code: "custom", path: ["ci"], message: "enabled CI configuration is required for this profile" });
     }
+    if (configuration.ci?.providers !== undefined) {
+      if (configuration.ci.provider_name === undefined) {
+        context.addIssue({ code: "custom", path: ["ci", "provider_name"], message: "named provider selection is required" });
+      } else if (configuration.ci.providers[configuration.ci.provider_name] === undefined) {
+        context.addIssue({ code: "custom", path: ["ci", "provider_name"], message: "selected provider is not configured" });
+      }
+    } else if (configuration.ci?.provider_name !== undefined) {
+      context.addIssue({ code: "custom", path: ["ci", "provider_name"], message: "named providers are not configured" });
+    }
+    if (configuration.ci?.enabled === true) {
+      const ci = configuration.ci;
+      const selected = ci.providers === undefined || ci.provider_name === undefined
+        ? { type: ci.provider, github: ci.github, jenkins: ci.jenkins, bitbucket: ci.bitbucket }
+        : ci.providers[ci.provider_name];
+      if (selected !== undefined) {
+        const providerConfig = selected.type === "github" ? selected.github : selected.type === "jenkins" ? selected.jenkins : selected.bitbucket;
+        if (providerConfig === undefined) {
+          context.addIssue({ code: "custom", path: ["ci", selected.type], message: "selected provider configuration is required" });
+        }
+        if (selected.type === "github") {
+          if (selected.github?.app === undefined) context.addIssue({ code: "custom", path: ["ci", "github", "app"], message: "GitHub App configuration is required" });
+          if (ci.approval === undefined) context.addIssue({ code: "custom", path: ["ci", "approval"], message: "approval configuration is required for rerun capability" });
+        }
+      }
+    }
     if (configuration.policy !== undefined) {
       for (const [serviceId, health] of Object.entries(configuration.policy.service_health)) {
         if (configuration.policy.named_queries[health.query_template] === undefined) {
@@ -173,6 +211,15 @@ export const RuntimeConfigSchema = z
 
 export type RuntimeConfiguration = z.infer<typeof RuntimeConfigSchema>;
 
+export interface RuntimeProviderMetadata {
+  readonly observability?: {
+    readonly metrics: string;
+    readonly alerts: string;
+    readonly grafana: string;
+  };
+  readonly ci?: CIProviderRuntimeMetadata;
+}
+
 export function parseRuntimeConfiguration(document: string): RuntimeConfiguration {
   let raw: unknown;
   try {
@@ -185,6 +232,21 @@ export function parseRuntimeConfiguration(document: string): RuntimeConfiguratio
     throw new Error("Invalid runtime configuration");
   }
   return parsed.data;
+}
+
+export function runtimeProviderMetadata(configuration: RuntimeConfiguration): RuntimeProviderMetadata {
+  const observability = configuration.providers === undefined
+    ? undefined
+    : {
+        metrics: configuration.providers.metrics.type,
+        alerts: configuration.providers.alerts.type,
+        grafana: configuration.providers.grafana.type,
+      };
+  const ci = configuration.ci?.enabled === true ? resolveCIProvider(configuration.ci).metadata : undefined;
+  return {
+    ...(observability === undefined ? {} : { observability }),
+    ...(ci === undefined ? {} : { ci }),
+  };
 }
 
 export interface LoadRuntimeConfigurationOptions {
@@ -205,6 +267,7 @@ export class LoadedRuntimeConfiguration {
     public readonly visualAllowlist: VisualAllowlist | undefined,
     bearerToken: string,
     public readonly ci: CIService | undefined = undefined,
+    public readonly runtimeMetadata: RuntimeProviderMetadata = {},
   ) {
     this.#bearerToken = bearerToken;
   }
@@ -224,6 +287,7 @@ export function loadRuntimeConfiguration(
   }
 
   const configuration = parseRuntimeConfiguration(document);
+  const runtimeMetadata = runtimeProviderMetadata(configuration);
 
   let provider: ObservabilityProvider | undefined;
   let visualProvider: ObservabilityVisualProvider | undefined;
@@ -297,57 +361,109 @@ export function loadRuntimeConfiguration(
     visualAllowlist,
     bearerToken,
     ci,
+    runtimeMetadata,
   );
 }
 
+type CIConfiguration = z.infer<typeof CIConfigSchema>;
+
+interface ResolvedCIProviderConfiguration {
+  readonly name: string;
+  readonly type: CIProviderType;
+  readonly github?: CIConfiguration["github"];
+  readonly jenkins?: CIConfiguration["jenkins"];
+  readonly bitbucket?: CIConfiguration["bitbucket"];
+}
+
+interface ResolvedCIProvider {
+  readonly configuration: ResolvedCIProviderConfiguration;
+  readonly metadata: CIProviderRuntimeMetadata;
+}
+
+function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
+  if (configuration.providers !== undefined) {
+    const name = configuration.provider_name;
+    const selected = name === undefined ? undefined : configuration.providers[name];
+    if (name === undefined || selected === undefined) throw new Error("Invalid CI runtime configuration");
+    return {
+      configuration: { name, type: selected.type, github: selected.github, jenkins: selected.jenkins, bitbucket: selected.bitbucket },
+      metadata: {
+        name,
+        type: selected.type,
+        capabilities: { read: true, rerun: selected.type === "github" },
+        approvalRequired: selected.type === "github",
+      },
+    };
+  }
+  return {
+    configuration: { name: configuration.provider, type: configuration.provider, github: configuration.github, jenkins: configuration.jenkins, bitbucket: configuration.bitbucket },
+    metadata: {
+      name: configuration.provider,
+      type: configuration.provider,
+      capabilities: { read: true, rerun: configuration.provider === "github" },
+      approvalRequired: configuration.provider === "github",
+    },
+  };
+}
+
 function buildCIConfiguration(
-  configuration: z.infer<typeof CIConfigSchema> | undefined,
+  configuration: CIConfiguration | undefined,
   options: LoadRuntimeConfigurationOptions,
 ): CIService | undefined {
   if (configuration?.enabled !== true) return undefined;
-  if (configuration.allowlist.length === 0 || configuration.approval === undefined) {
+  if (configuration.allowlist.length === 0) {
     throw new Error("Invalid CI runtime configuration");
   }
+  const selected = resolveCIProvider(configuration);
   const repositories = configuration.allowlist.map((entry) => entry.repo);
   const clock = options.clock ?? (() => new Date());
-  const provider = configuration.provider === "jenkins"
-    ? configuration.jenkins === undefined
+  const provider = selected.configuration.type === "jenkins"
+    ? selected.configuration.jenkins === undefined
       ? (() => { throw new Error("Invalid CI runtime configuration"); })()
       : new JenkinsProvider({
-          baseUrl: configuration.jenkins.base_url,
+          baseUrl: selected.configuration.jenkins.base_url,
           fetch: options.fetch,
           ...(options.clock === undefined ? {} : { clock }),
           maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
         })
-    : configuration.provider === "bitbucket"
-      ? configuration.bitbucket === undefined
+    : selected.configuration.type === "bitbucket"
+      ? selected.configuration.bitbucket === undefined
         ? (() => { throw new Error("Invalid CI runtime configuration"); })()
         : new BitbucketProvider({
-            baseUrl: configuration.bitbucket.base_url,
-            tokenFile: configuration.bitbucket.token_file,
-            ...(configuration.bitbucket.username === undefined ? {} : { username: configuration.bitbucket.username }),
+            baseUrl: selected.configuration.bitbucket.base_url,
+            tokenFile: selected.configuration.bitbucket.token_file,
+            ...(selected.configuration.bitbucket.username === undefined ? {} : { username: selected.configuration.bitbucket.username }),
             fetch: options.fetch,
             ...(options.clock === undefined ? {} : { clock }),
             maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
           })
-      : buildGitHubProvider(configuration, repositories, options, clock);
-  const key = ApprovalTokenService.readKeyFile(configuration.approval.key_file);
-  const audit = new FileApprovalAuditStore({
-    replayPath: configuration.approval.replay_file,
-    auditPath: configuration.approval.audit_file,
-  });
+      : buildGitHubProvider(selected.configuration, repositories, options, clock, configuration.max_freshness_seconds);
+  const approval = selected.metadata.approvalRequired
+    ? configuration.approval === undefined
+      ? (() => { throw new Error("Invalid CI runtime configuration"); })()
+      : (() => {
+          const key = ApprovalTokenService.readKeyFile(configuration.approval.key_file);
+          const audit = new FileApprovalAuditStore({
+            replayPath: configuration.approval.replay_file,
+            auditPath: configuration.approval.audit_file,
+          });
+          return new ApprovalTokenService({ key, clock, audit });
+        })()
+    : undefined;
   return {
     provider,
     policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
-    approval: new ApprovalTokenService({ key, clock, audit }),
+    runtimeMetadata: selected.metadata,
+    ...(approval === undefined ? {} : { approval }),
   };
 }
 
 function buildGitHubProvider(
-  configuration: z.infer<typeof CIConfigSchema>,
+  configuration: ResolvedCIProviderConfiguration,
   repositories: readonly string[],
   options: LoadRuntimeConfigurationOptions,
   clock: Clock,
+  maxFreshnessSeconds: number,
 ): GitHubActionsProvider {
   if (configuration.github === undefined) throw new Error("Invalid CI runtime configuration");
   const app = configuration.github.app;
@@ -408,7 +524,7 @@ function buildGitHubProvider(
     fetch: options.fetch,
     ...(options.clock === undefined ? {} : { clock }),
     apiBaseUrl: configuration.github.api_base_url,
-    maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
+    maxFreshnessMs: maxFreshnessSeconds * 1_000,
   });
 }
 

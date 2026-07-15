@@ -22,6 +22,12 @@ function ci(fetch: typeof globalThis.fetch) {
     policy: createCIAllowlist({
       "owner/repo": ["goal14-controlled-fixture.yml"],
     }),
+    runtimeMetadata: {
+      name: "github-test",
+      type: "github",
+      capabilities: { read: true, rerun: true },
+      approvalRequired: true,
+    } as const,
     approval: new ApprovalTokenService({
       key: Buffer.from("c".repeat(32)),
       clock: () => NOW,

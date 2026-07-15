@@ -62,6 +62,7 @@ describe("private Streamable HTTP transport", () => {
       ci: {
         provider: new GitHubActionsProvider({ token: "github-token-for-http-test", fetch: globalThis.fetch, clock: () => FIXED_NOW }),
         policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
+        runtimeMetadata: { name: "github-http-test", type: "github", capabilities: { read: true, rerun: true }, approvalRequired: true },
         approval: new ApprovalTokenService({ key: Buffer.from("c".repeat(32)), clock: () => FIXED_NOW, audit: new InMemoryApprovalAuditStore() }),
       },
       bearerToken: TEST_CREDENTIAL,
@@ -98,6 +99,7 @@ describe("private Streamable HTTP transport", () => {
       ci: {
         provider: new GitHubActionsProvider({ token: "github-token-for-http-test", fetch: globalThis.fetch, clock: () => FIXED_NOW }),
         policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
+        runtimeMetadata: { name: "github-http-test", type: "github", capabilities: { read: true, rerun: true }, approvalRequired: true },
         approval: new ApprovalTokenService({ key: Buffer.from("c".repeat(32)), clock: () => FIXED_NOW, audit: new InMemoryApprovalAuditStore() }),
       },
       bearerToken: TEST_CREDENTIAL,

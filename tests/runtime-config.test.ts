@@ -90,6 +90,13 @@ describe("private runtime configuration", () => {
     expect(diagnostic).toMatchObject({
       ok: true,
       profile: "observability-only",
+      runtimeMetadata: {
+        observability: {
+          metrics: "prometheus-compatible",
+          alerts: "vmalert",
+          grafana: "grafana",
+        },
+      },
       diagnostics: [{ code: "RUNTIME_CONFIG_OK", severity: "info" }],
     });
     const output = JSON.stringify(diagnostic);
@@ -186,6 +193,41 @@ ci:
     await runtime.provider!.activeAlerts({});
     expect(String(fetch.mock.calls[0]?.[0])).toBe("https://grafana:3000/api/alertmanager/grafana/api/v2/alerts");
     expect(runtime.ci?.provider.constructor.name).toBe("JenkinsProvider");
+  });
+
+  it("selects a named read-only provider without requiring an approval HMAC", () => {
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}
+ci:
+  enabled: true
+  provider_name: jenkins-prod
+  providers:
+    jenkins-prod:
+      type: jenkins
+      jenkins:
+        base_url: https://jenkins.local
+  allowlist:
+    - repo: academytools/planpal-infra-6
+      workflows: [planpal-infra-6]
+`);
+
+    const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
+
+    expect(runtime.ci?.runtimeMetadata).toEqual({
+      name: "jenkins-prod",
+      type: "jenkins",
+      capabilities: { read: true, rerun: false },
+      approvalRequired: false,
+    });
+    expect(runtime.runtimeMetadata?.ci).toEqual(runtime.ci?.runtimeMetadata);
+    expect(runtime.runtimeMetadata?.observability).toEqual({
+      metrics: "prometheus-compatible",
+      alerts: "vmalert",
+      grafana: "grafana",
+    });
+    expect(diagnoseRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath })).toMatchObject({
+      ok: true,
+      runtimeMetadata: { ci: runtime.ci?.runtimeMetadata },
+    });
   });
 
   it("keeps runtime CI reads on Actions read and reruns on a separate write token", async () => {
