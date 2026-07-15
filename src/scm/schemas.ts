@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { CIProviderNameSchema, CIProviderNativeIdSchema } from "../domain/ci-schemas.js";
+import { CIProviderNativeIdSchema } from "../domain/ci-schemas.js";
+import { CIProviderNameSchema } from "../domain/ci-provider-contracts.js";
 
 export const SCM_SCHEMA_VERSION = "1.0" as const;
 

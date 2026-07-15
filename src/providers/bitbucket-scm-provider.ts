@@ -141,9 +141,9 @@ function basicAuthorization(options: BitbucketSCMProviderOptions): string {
     value = readFileSync(options.tokenFile, "utf8").trim();
   }
   if (value === undefined || value.length === 0) throw new Error("Bitbucket token is required");
-  const credential = options.username === undefined ? value : `${options.username}:${value}`;
-  if (!credential.includes(":")) throw new Error("Bitbucket Basic auth requires username:token");
-  return `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+  if (options.username !== undefined) return `Basic ${Buffer.from(`${options.username}:${value}`, "utf8").toString("base64")}`;
+  if (value.includes(":")) return `Basic ${Buffer.from(value, "utf8").toString("base64")}`;
+  return `Bearer ${value}`;
 }
 
 function repositoryPath(value: string): string {
@@ -226,7 +226,7 @@ function bitbucketFiles(values: readonly unknown[], diffs: ReadonlyMap<string, s
     if (path === undefined) throw new SCMProviderError("malformed");
     const status = statusType(raw.status, oldPath, newPath);
     const patch = diffs.get(path);
-    return { path, status, additions: count(raw.lines_added), deletions: count(raw.lines_removed), patch, binary: patch !== undefined && /(?:^Binary files|GIT binary patch)/im.test(patch) };
+    return { path, status, additions: count(raw.lines_added), deletions: count(raw.lines_removed), ...(patch === undefined ? {} : { patch }), binary: patch !== undefined && /(?:^Binary files|GIT binary patch)/im.test(patch) };
   });
 }
 

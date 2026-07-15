@@ -138,7 +138,7 @@ function githubFiles(value: unknown): RawSCMFile[] {
       status: githubStatus(raw.status),
       additions: count(raw.additions),
       deletions: count(raw.deletions),
-      patch: typeof raw.patch === "string" ? raw.patch : undefined,
+      ...(typeof raw.patch === "string" ? { patch: raw.patch } : {}),
       binary: raw.patch === undefined,
     };
   });

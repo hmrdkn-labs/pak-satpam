@@ -183,7 +183,7 @@ export function finalizeSCMEvidence(args: {
     base: args.base,
     head: args.head,
     ...(args.pullRequest === undefined ? {} : { pullRequest: args.pullRequest }),
-    files: bounded.items,
+    files: [...bounded.items],
     summary: { files: bounded.items.length, additions, deletions },
   };
   return makeSCMEvidence(args.providerClass, args.observedAt, data, {

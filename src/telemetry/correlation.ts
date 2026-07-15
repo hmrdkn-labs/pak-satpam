@@ -11,4 +11,3 @@ export function buildTelemetryCorrelationKey(input: TelemetryCorrelation): strin
     `to=${input.to}`,
   ].join("|");
 }
-
