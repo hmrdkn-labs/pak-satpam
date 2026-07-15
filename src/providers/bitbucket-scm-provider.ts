@@ -5,6 +5,7 @@ import {
   boundedJson,
   boundedResponseText,
   commit,
+  createSCMBudgetGuard,
   finalizeSCMEvidence,
   nativeId,
   prepareSCMInput,
@@ -17,8 +18,9 @@ import {
 import { redactSCMText, normalizeRepositoryFromUrl } from "../scm/context.js";
 import { SCMProviderError, type SCMReadProvider } from "../scm/provider.js";
 import type { SCMChangeEvidenceInput, SCMChangeEvidenceResult, SCMPullRequest } from "../scm/schemas.js";
+import { assertCIProviderTransport, normalizeCIProviderEndpoint } from "../domain/ci-provider-contracts.js";
 
-const BITBUCKET_PROVIDER_NAME = "bitbucket";
+const BITBUCKET_PROVIDER_NAME = "bitbucket-cloud";
 
 export interface BitbucketSCMProviderOptions {
   readonly baseUrl: string;
@@ -44,7 +46,7 @@ export class BitbucketSCMProvider implements SCMReadProvider {
     this.#baseUrl = assertTrustedHost(options.baseUrl, options.allowedHosts, "Bitbucket API base URL");
     if (!this.#baseUrl.pathname.endsWith("/")) this.#baseUrl.pathname += "/";
     this.#authorization = basicAuthorization(options);
-    if (this.#baseUrl.protocol !== "https:") throw new Error("Bitbucket SCM credentials require HTTPS");
+    assertCIProviderTransport(normalizeCIProviderEndpoint({ origin: this.#baseUrl.origin, path: this.#baseUrl.pathname }), { providerLabel: "Bitbucket", credentialed: true });
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#allowlists = options;
@@ -52,19 +54,21 @@ export class BitbucketSCMProvider implements SCMReadProvider {
 
   async getChangeEvidence(input: SCMChangeEvidenceInput): Promise<SCMChangeEvidenceResult> {
     const prepared = prepareSCMInput(input, this.#allowlists);
-    if (prepared.input.pullRequest !== undefined) return this.pullRequestEvidence(prepared);
+    const budgetGuard = createSCMBudgetGuard(prepared.budget, this.#clock);
+    if (prepared.input.pullRequest !== undefined) return this.pullRequestEvidence(prepared, budgetGuard);
+    if (prepared.input.compare !== undefined) return this.compareEvidence(prepared, budgetGuard);
     const selector = prepared.input.commit ?? prepared.input.ref;
     if (selector === undefined) throw new SCMProviderError("malformed");
     const repoPath = repositoryPath(prepared.input.repository);
     const commitValue = prepared.input.ref === undefined
-      ? await this.json(`/repositories/${repoPath}/commit/${encodeURIComponent(selector)}`)
-      : await this.json(`/repositories/${repoPath}/commits/${encodeURIComponent(selector)}?pagelen=1`);
+      ? await this.json(`/repositories/${repoPath}/commit/${encodeURIComponent(selector)}`, budgetGuard)
+      : await this.json(`/repositories/${repoPath}/commits/${encodeURIComponent(selector)}?pagelen=1`, budgetGuard);
     const raw = firstCommit(commitValue);
     if (repositoryFrom(raw.repository) !== prepared.input.repository) throw new SCMProviderError("malformed");
     const headSha = commit(raw.hash);
     if (prepared.input.commit !== undefined && headSha !== prepared.input.commit.toLowerCase()) throw new SCMProviderError("malformed");
     if (prepared.input.ref !== undefined) assertResponseRef(prepared.input.ref, this.#allowlists.allowedRefs);
-    const files = await this.commitFiles(repoPath, headSha, prepared.budget.maxItems);
+    const files = await this.commitFiles(repoPath, headSha, prepared.budget.maxFiles, budgetGuard);
     return finalizeSCMEvidence({
       providerClass: BITBUCKET_PROVIDER_NAME,
       observedAt: this.#clock(),
@@ -73,6 +77,7 @@ export class BitbucketSCMProvider implements SCMReadProvider {
       head: { ...(prepared.input.ref === undefined ? {} : { ref: prepared.input.ref }), sha: headSha },
       files: files.files,
       providerTruncated: files.truncated,
+      budgetGuard,
     });
   }
 
@@ -80,21 +85,43 @@ export class BitbucketSCMProvider implements SCMReadProvider {
     return this.getChangeEvidence(input);
   }
 
-  private async pullRequestEvidence(prepared: ReturnType<typeof prepareSCMInput>): Promise<SCMChangeEvidenceResult> {
+  private async compareEvidence(prepared: ReturnType<typeof prepareSCMInput>, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<SCMChangeEvidenceResult> {
+    const compare = prepared.input.compare;
+    if (compare === undefined) throw new SCMProviderError("malformed");
+    const repoPath = repositoryPath(prepared.input.repository);
+    const head = /^[a-f0-9]{40}$/i.test(compare.head) ? commit(compare.head) : await this.resolveRevision(repoPath, compare.head, budgetGuard);
+    const stats = await this.json(`/repositories/${repoPath}/diffstat/${encodeURIComponent(`${compare.base}..${compare.head}`)}?pagelen=${prepared.budget.maxFiles}`, budgetGuard);
+    const values = arrayField(stats, "values");
+    const diffResponse = await this.request(`/repositories/${repoPath}/diff/${encodeURIComponent(`${compare.base}..${compare.head}`)}`, budgetGuard);
+    if (!diffResponse.ok) throw providerHttpError(diffResponse.status);
+    const files = bitbucketFiles(values.slice(0, prepared.budget.maxFiles), parseDiff(await boundedResponseText(diffResponse)));
+    return finalizeSCMEvidence({
+      providerClass: BITBUCKET_PROVIDER_NAME,
+      observedAt: this.#clock(),
+      prepared,
+      base: { ...(revisionRef(compare.base) === undefined ? {} : { ref: revisionRef(compare.base) }), ...(isCommit(compare.base) ? { sha: commit(compare.base) } : {}) },
+      head: { ...(revisionRef(compare.head) === undefined ? {} : { ref: revisionRef(compare.head) }), sha: head },
+      files,
+      providerTruncated: values.length > prepared.budget.maxFiles,
+      budgetGuard,
+    });
+  }
+
+  private async pullRequestEvidence(prepared: ReturnType<typeof prepareSCMInput>, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<SCMChangeEvidenceResult> {
     const repositoryName = prepared.input.repository;
     const pullRequestId = prepared.input.pullRequest;
     if (pullRequestId === undefined) throw new SCMProviderError("malformed");
     const repoPath = repositoryPath(repositoryName);
-    const raw = await this.json(`/repositories/${repoPath}/pullrequests/${encodeURIComponent(pullRequestId)}`);
+    const raw = await this.json(`/repositories/${repoPath}/pullrequests/${encodeURIComponent(pullRequestId)}`, budgetGuard);
     const pullRequest = normalizePullRequest(raw, repositoryName, pullRequestId, this.#allowlists.allowedRefs);
     if (prepared.input.ref !== undefined && prepared.input.ref !== pullRequest.base.ref && prepared.input.ref !== pullRequest.head.ref) throw new SCMProviderError("permission");
     if (prepared.input.commit !== undefined && prepared.input.commit.toLowerCase() !== pullRequest.head.sha) throw new SCMProviderError("permission");
-    const stats = await this.json(`/repositories/${repoPath}/pullrequests/${encodeURIComponent(pullRequestId)}/diffstat?pagelen=${prepared.budget.maxItems}`);
+    const stats = await this.json(`/repositories/${repoPath}/pullrequests/${encodeURIComponent(pullRequestId)}/diffstat?pagelen=${prepared.budget.maxFiles}`, budgetGuard);
     const values = arrayField(stats, "values");
-    const diffResponse = await this.request(`/repositories/${repoPath}/pullrequests/${encodeURIComponent(pullRequestId)}/diff`);
+    const diffResponse = await this.request(`/repositories/${repoPath}/pullrequests/${encodeURIComponent(pullRequestId)}/diff`, budgetGuard);
     if (!diffResponse.ok) throw providerHttpError(diffResponse.status);
     const diff = parseDiff(await boundedResponseText(diffResponse));
-    const files = bitbucketFiles(values, diff);
+    const files = bitbucketFiles(values.slice(0, prepared.budget.maxFiles), diff);
     return finalizeSCMEvidence({
       providerClass: BITBUCKET_PROVIDER_NAME,
       observedAt: this.#clock(),
@@ -103,31 +130,40 @@ export class BitbucketSCMProvider implements SCMReadProvider {
       head: { ref: pullRequest.head.ref, sha: pullRequest.head.sha ?? "" },
       pullRequest,
       files,
-      providerTruncated: values.length >= prepared.budget.maxItems,
+      providerTruncated: values.length > prepared.budget.maxFiles,
+      budgetGuard,
     });
   }
 
-  private async commitFiles(repoPath: string, sha: string, maxItems: number): Promise<{ files: RawSCMFile[]; truncated: boolean }> {
-    const stats = await this.json(`/repositories/${repoPath}/commit/${encodeURIComponent(sha)}/diffstat?pagelen=${maxItems}`);
+  private async commitFiles(repoPath: string, sha: string, maxItems: number, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<{ files: RawSCMFile[]; truncated: boolean }> {
+    const stats = await this.json(`/repositories/${repoPath}/commit/${encodeURIComponent(sha)}/diffstat?pagelen=${maxItems}`, budgetGuard);
     const values = arrayField(stats, "values");
-    const diffResponse = await this.request(`/repositories/${repoPath}/commit/${encodeURIComponent(sha)}/diff`);
+    const diffResponse = await this.request(`/repositories/${repoPath}/commit/${encodeURIComponent(sha)}/diff`, budgetGuard);
     if (!diffResponse.ok) throw providerHttpError(diffResponse.status);
     const diff = parseDiff(await boundedResponseText(diffResponse));
-    return { files: bitbucketFiles(values, diff), truncated: values.length >= maxItems };
+    return { files: bitbucketFiles(values.slice(0, maxItems), diff), truncated: values.length > maxItems };
   }
 
-  private async json(path: string): Promise<Record<string, unknown>> {
-    return boundedJson(await this.request(path));
+  private async resolveRevision(repoPath: string, revision: string, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<string> {
+    const raw = firstCommit(await this.json(`/repositories/${repoPath}/commits/${encodeURIComponent(revision)}?pagelen=1`, budgetGuard));
+    return commit(raw.hash);
   }
 
-  private async request(path: string): Promise<Response> {
+  private async json(path: string, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<Record<string, unknown>> {
+    return boundedJson(await this.request(path, budgetGuard));
+  }
+
+  private async request(path: string, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<Response> {
+    budgetGuard.beginRequest();
     try {
-      return await this.#fetch(resolveSCMUrl(this.#baseUrl, path), {
+      const response = await this.#fetch(resolveSCMUrl(this.#baseUrl, path), {
         method: "GET",
         headers: { accept: "application/json, text/plain", authorization: this.#authorization },
         redirect: "error",
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(Math.min(10_000, budgetGuard.remainingMs)),
       });
+      budgetGuard.finishRequest();
+      return response;
     } catch { throw new SCMProviderError("unavailable"); }
   }
 }
@@ -151,6 +187,9 @@ function repositoryPath(value: string): string {
   if (workspace === undefined || slug === undefined || extra !== undefined) throw new SCMProviderError("malformed");
   return `${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}`;
 }
+
+function isCommit(value: string): boolean { return /^[a-f0-9]{40}$/i.test(value); }
+function revisionRef(value: string): string | undefined { return isCommit(value) ? undefined : ref(value); }
 
 function normalizePullRequest(raw: Record<string, unknown>, expectedRepository: string, expectedId: string, allowedRefs: readonly string[] | undefined): SCMPullRequest {
   const id = nativeId(raw.id);

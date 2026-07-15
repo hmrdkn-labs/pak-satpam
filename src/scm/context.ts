@@ -11,7 +11,7 @@ export interface RedactedSCMText {
 export interface SCMBoundedItems<T> {
   readonly items: readonly T[];
   readonly truncated: boolean;
-  readonly usage: { readonly bytes: number; readonly items: number; readonly tokens: number };
+  readonly usage: { readonly bytes: number; readonly items: number; readonly tokens: number; readonly hunks: number; readonly lines: number };
 }
 
 export function utf8Bytes(value: string): number {
@@ -41,18 +41,25 @@ export function isBinaryText(value: string): boolean {
   return value.includes("\u0000") || /^(?:Binary files|GIT binary patch)/im.test(value);
 }
 
-export function boundSCMItems<T>(items: readonly T[], budget: SCMBudget): SCMBoundedItems<T> {
+type SCMItemBudget = Pick<SCMBudget, "maxBytes"> & Partial<Pick<SCMBudget, "maxFiles" | "maxHunks" | "maxLines">> & { readonly maxItems?: number; readonly maxTokens?: number };
+
+export function boundSCMItems<T>(items: readonly T[], budget: SCMItemBudget): SCMBoundedItems<T> {
   const selected: T[] = [];
   let truncated = false;
+  const maxFiles = budget.maxFiles ?? budget.maxItems ?? 100;
+  const maxHunks = budget.maxHunks ?? Number.MAX_SAFE_INTEGER;
+  const maxLines = budget.maxLines ?? Number.MAX_SAFE_INTEGER;
+  const maxTokens = budget.maxTokens ?? Number.MAX_SAFE_INTEGER;
   for (const item of items) {
-    if (selected.length >= budget.maxItems) {
+    if (selected.length >= maxFiles) {
       truncated = true;
       break;
     }
     const candidate = [...selected, item];
     const bytes = utf8Bytes(JSON.stringify(candidate) ?? "null");
     const tokens = Math.ceil(bytes / 4);
-    if (bytes > budget.maxBytes || tokens > budget.maxTokens) {
+    const usage = scmPatchUsage(candidate);
+    if (bytes > budget.maxBytes || tokens > maxTokens || usage.hunks > maxHunks || usage.lines > maxLines) {
       truncated = true;
       break;
     }
@@ -61,7 +68,20 @@ export function boundSCMItems<T>(items: readonly T[], budget: SCMBudget): SCMBou
   if (selected.length < items.length) truncated = true;
   const serialized = JSON.stringify(selected) ?? "null";
   const bytes = utf8Bytes(serialized);
-  return { items: selected, truncated, usage: { bytes, items: selected.length, tokens: Math.ceil(bytes / 4) } };
+  const usage = scmPatchUsage(selected);
+  return { items: selected, truncated, usage: { bytes, items: selected.length, tokens: Math.ceil(bytes / 4), ...usage } };
+}
+
+function scmPatchUsage(items: readonly unknown[]): { readonly hunks: number; readonly lines: number } {
+  let hunks = 0;
+  let lines = 0;
+  for (const item of items) {
+    if (item === null || typeof item !== "object" || typeof (item as { patch?: unknown }).patch !== "string") continue;
+    const patchLines = ((item as { patch: string }).patch).split(/\r?\n/);
+    hunks += patchLines.filter((line) => line.startsWith("@@")).length;
+    lines += patchLines.filter((line) => !line.startsWith("@@")).length;
+  }
+  return { hunks, lines };
 }
 
 export function assertAllowedRepository(repository: string, allowlist: readonly string[] | undefined): void {

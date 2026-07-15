@@ -28,12 +28,44 @@ export interface SCMPreparedInput {
   readonly budget: SCMBudget;
 }
 
+export interface SCMBudgetGuard {
+  readonly requests: number;
+  readonly elapsedMs: number;
+  readonly remainingMs: number;
+  beginRequest(): void;
+  finishRequest(): void;
+}
+
+export function createSCMBudgetGuard(budget: SCMBudget, clock: () => Date): SCMBudgetGuard {
+  const startedAt = clock().getTime();
+  let requests = 0;
+  let elapsedMs = 0;
+  const check = () => {
+    elapsedMs = Math.max(0, clock().getTime() - startedAt);
+    if (elapsedMs > budget.maxDurationMs) throw new SCMProviderError("unavailable");
+  };
+  return {
+    get requests() { return requests; },
+    get elapsedMs() { check(); return elapsedMs; },
+    get remainingMs() { check(); return Math.max(1, budget.maxDurationMs - elapsedMs); },
+    beginRequest() {
+      check();
+      if (requests >= budget.maxProviderRequests) throw new SCMProviderError("unavailable");
+      requests += 1;
+    },
+    finishRequest() { check(); },
+  };
+}
+
 export function prepareSCMInput(value: unknown, options: SCMAllowlistOptions): SCMPreparedInput {
   let input: SCMChangeEvidenceInput;
   try {
     input = SCMChangeEvidenceInputSchema.parse(value);
     assertAllowedRepository(input.repository, options.allowedRepositories);
     assertAllowedRef(input.ref, options.allowedRefs);
+    for (const revision of input.compare === undefined ? [] : [input.compare.base, input.compare.head]) {
+      if (!/^[a-f0-9]{40}$/i.test(revision)) assertAllowedRef(revision, options.allowedRefs);
+    }
   } catch (error) {
     if (error instanceof SCMProviderError) throw error;
     const message = error instanceof Error ? error.message : "invalid SCM input";
@@ -56,6 +88,9 @@ export function assertTrustedHost(value: string, allowedHosts: readonly string[]
 }
 
 export function resolveSCMUrl(baseUrl: URL, path: string): URL {
+  if (path.includes("#") || path.startsWith("//") || path.split(/[/?#]/, 1)[0]?.includes("..") || path.split("/").some((segment) => segment === "..")) {
+    throw new SCMProviderError("permission");
+  }
   const url = new URL(path.replace(/^\/+/, ""), baseUrl);
   if (url.origin !== baseUrl.origin || !url.pathname.startsWith(baseUrl.pathname)) throw new SCMProviderError("permission");
   return url;
@@ -125,11 +160,11 @@ export interface RawSCMFile {
   readonly binary?: boolean;
 }
 
-export function normalizeFile(raw: RawSCMFile, budget: SCMBudget): { file: SCMFileChange; redacted: boolean } {
+export function normalizeFile(raw: RawSCMFile, budget: SCMBudget): { file: SCMFileChange; redacted: boolean; truncated: { hunks: boolean; lines: boolean; bytes: boolean } } {
   if (raw.path.startsWith("/") || raw.path.split("/").some((segment) => segment === "..")) throw new SCMProviderError("malformed");
   const path = redactSCMText(raw.path, 1_024);
   if (path.binary) throw new SCMProviderError("malformed");
-  const patchBudget = Math.max(64, Math.min(32 * 1_024, Math.floor(budget.maxBytes / 4)));
+  const patchBudget = Math.max(32, Math.min(32 * 1_024, Math.floor(budget.maxBytes / 4)));
   let result: SCMFileChange = {
     path: path.text,
     status: raw.status,
@@ -138,24 +173,49 @@ export function normalizeFile(raw: RawSCMFile, budget: SCMBudget): { file: SCMFi
     binary: raw.binary === true,
   };
   let redacted = path.redacted;
+  const truncated = { hunks: false, lines: false, bytes: false };
   if (result.binary) {
     result = { ...result, suppressedReason: "binary" };
   } else if (raw.patch !== undefined) {
-    const patch = redactSCMText(raw.patch, patchBudget);
+    const boundedInput = raw.patch.length > patchBudget * 8 ? raw.patch.slice(0, patchBudget * 8) : raw.patch;
+    const patch = redactSCMText(boundedInput, patchBudget);
     redacted ||= patch.redacted;
+    truncated.bytes = patch.truncated || boundedInput.length !== raw.patch.length;
     if (patch.binary) {
       result = { ...result, binary: true, suppressedReason: "binary" };
     } else {
+      const selected = boundedPatchLines(patch.text, budget.maxHunks, budget.maxLines);
+      truncated.hunks = selected.hunksTruncated;
+      truncated.lines = selected.linesTruncated;
       result = {
         ...result,
-        patch: patch.text,
-        ...(patch.truncated ? { suppressedReason: "budget" as const } : {}),
+        patch: selected.text,
+        ...(patch.truncated || selected.hunksTruncated || selected.linesTruncated || truncated.bytes ? { suppressedReason: "budget" as const } : {}),
       };
     }
   } else {
     result = { ...result, suppressedReason: "provider-omitted" };
   }
-  return { file: result, redacted };
+  return { file: result, redacted, truncated };
+}
+
+function boundedPatchLines(value: string, maxHunks: number, maxLines: number): { text: string; hunksTruncated: boolean; linesTruncated: boolean } {
+  const selected: string[] = [];
+  let hunks = 0;
+  let lines = 0;
+  let hunksTruncated = false;
+  let linesTruncated = false;
+  for (const line of value.split(/\r?\n/)) {
+    if (line.startsWith("@@")) {
+      if (hunks >= maxHunks) { hunksTruncated = true; break; }
+      hunks += 1;
+    } else {
+      if (lines >= maxLines) { linesTruncated = true; break; }
+      lines += 1;
+    }
+    selected.push(line);
+  }
+  return { text: selected.join("\n"), hunksTruncated, linesTruncated };
 }
 
 export function finalizeSCMEvidence(args: {
@@ -168,6 +228,7 @@ export function finalizeSCMEvidence(args: {
   readonly files: readonly RawSCMFile[];
   readonly providerTruncated?: boolean;
   readonly providerRedactions?: boolean;
+  readonly budgetGuard?: SCMBudgetGuard;
 }): SCMChangeEvidenceResult {
   const normalized = args.files.map((file) => normalizeFile(file, args.prepared.budget));
   const bounded: SCMBoundedItems<SCMFileChange> = boundSCMItems(normalized.map((item) => item.file), args.prepared.budget);
@@ -179,6 +240,7 @@ export function finalizeSCMEvidence(args: {
       ...(args.prepared.input.ref === undefined ? {} : { ref: args.prepared.input.ref }),
       ...(args.prepared.input.commit === undefined ? {} : { commit: args.prepared.input.commit }),
       ...(args.prepared.input.pullRequest === undefined ? {} : { pullRequest: args.prepared.input.pullRequest }),
+      ...(args.prepared.input.compare === undefined ? {} : { compare: args.prepared.input.compare }),
     },
     base: args.base,
     head: args.head,
@@ -186,15 +248,32 @@ export function finalizeSCMEvidence(args: {
     files: [...bounded.items],
     summary: { files: bounded.items.length, additions, deletions },
   };
+  const guard = args.budgetGuard;
+  const filesTruncated = Boolean(args.providerTruncated) || normalized.length > args.prepared.budget.maxFiles;
+  const hunksTruncated = normalized.some((item) => item.truncated.hunks) || bounded.usage.hunks >= args.prepared.budget.maxHunks;
+  const linesTruncated = normalized.some((item) => item.truncated.lines) || bounded.usage.lines >= args.prepared.budget.maxLines;
+  const bytesTruncated = normalized.some((item) => item.truncated.bytes) || (bounded.truncated && !filesTruncated && !hunksTruncated && !linesTruncated);
+  const truncation = {
+    files: filesTruncated,
+    hunks: hunksTruncated,
+    lines: linesTruncated,
+    bytes: bytesTruncated,
+    providerRequests: false,
+    timeWindow: false,
+  } as const;
   return makeSCMEvidence(args.providerClass, args.observedAt, data, {
     freshness: "fresh",
-    truncated: Boolean(args.providerTruncated) || bounded.truncated,
+    truncated: bounded.truncated || Object.values(truncation).some(Boolean),
+    truncation,
     redactionsApplied: Boolean(args.providerRedactions) || normalized.some((item) => item.redacted),
     budget: {
       ...args.prepared.budget,
       usedBytes: bounded.usage.bytes,
-      usedItems: bounded.usage.items,
-      usedTokens: bounded.usage.tokens,
+      usedFiles: bounded.usage.items,
+      usedHunks: bounded.usage.hunks,
+      usedLines: bounded.usage.lines,
+      usedProviderRequests: guard?.requests ?? 0,
+      usedDurationMs: guard?.elapsedMs ?? 0,
     },
   });
 }

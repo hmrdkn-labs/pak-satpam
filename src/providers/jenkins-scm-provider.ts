@@ -4,6 +4,7 @@ import {
   assertResponseRef,
   boundedJson,
   commit,
+  createSCMBudgetGuard,
   finalizeSCMEvidence,
   prepareSCMInput,
   ref,
@@ -14,6 +15,7 @@ import {
 import { assertAllowedRef, normalizeRepositoryFromUrl } from "../scm/context.js";
 import { SCMProviderError, type SCMReadProvider } from "../scm/provider.js";
 import type { SCMChangeEvidenceInput, SCMChangeEvidenceResult, SCMPullRequest } from "../scm/schemas.js";
+import { assertCIProviderTransport, normalizeCIProviderEndpoint } from "../domain/ci-provider-contracts.js";
 
 const JENKINS_PROVIDER_NAME = "jenkins";
 
@@ -29,6 +31,7 @@ export interface JenkinsSCMProviderOptions {
   readonly allowedRepositories: readonly string[];
   readonly allowedRefs: readonly string[];
   readonly allowedHosts?: readonly string[];
+  readonly allowInsecureHttp?: boolean;
 }
 
 export class JenkinsSCMProvider implements SCMReadProvider {
@@ -47,8 +50,12 @@ export class JenkinsSCMProvider implements SCMReadProvider {
     this.#job = safeJob(options.job);
     this.#branch = options.branch;
     if (this.#branch !== undefined) ref(this.#branch);
+    assertCIProviderTransport(normalizeCIProviderEndpoint({ origin: this.#baseUrl.origin, path: this.#baseUrl.pathname }), {
+      providerLabel: "Jenkins",
+      credentialed: options.username !== undefined || options.token !== undefined || options.tokenFile !== undefined,
+      ...(options.allowInsecureHttp === undefined ? {} : { allowInsecureHttp: options.allowInsecureHttp }),
+    });
     this.#authorization = basicAuthorization(options);
-    if (this.#authorization !== undefined && this.#baseUrl.protocol !== "https:") throw new Error("Jenkins SCM credentials require HTTPS");
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#allowlists = options;
@@ -56,11 +63,13 @@ export class JenkinsSCMProvider implements SCMReadProvider {
 
   async getChangeEvidence(input: SCMChangeEvidenceInput): Promise<SCMChangeEvidenceResult> {
     const prepared = prepareSCMInput(input, this.#allowlists);
+    if (prepared.input.compare !== undefined) throw new SCMProviderError("unsupported");
+    const budgetGuard = createSCMBudgetGuard(prepared.budget, this.#clock);
     const branch = this.#branch ?? prepared.input.ref;
     if (branch === undefined) throw new SCMProviderError("malformed");
     try { assertAllowedRef(branch, this.#allowlists.allowedRefs); } catch { throw new SCMProviderError("permission"); }
     if (prepared.input.ref !== undefined && prepared.input.ref !== branch) throw new SCMProviderError("permission");
-    const response = await this.request(buildPath(this.#job, branch));
+    const response = await this.request(buildPath(this.#job, branch), budgetGuard);
     const raw = await boundedJson(response);
     const reportedRepository = jenkinsRepository(raw);
     if (reportedRepository !== prepared.input.repository) throw new SCMProviderError("malformed");
@@ -69,7 +78,7 @@ export class JenkinsSCMProvider implements SCMReadProvider {
     assertResponseRef(reportedRef, this.#allowlists.allowedRefs);
     const headSha = jenkinsSha(raw);
     if (prepared.input.commit !== undefined && prepared.input.commit.toLowerCase() !== headSha) throw new SCMProviderError("malformed");
-    const files = jenkinsFiles(raw.changeSets);
+    const files = jenkinsFiles(raw.changeSets, prepared.budget.maxFiles);
     const pullRequest = prepared.input.pullRequest === undefined ? undefined : jenkinsPullRequest(raw.changeSets, prepared.input.pullRequest, reportedRef, headSha);
     return finalizeSCMEvidence({
       providerClass: JENKINS_PROVIDER_NAME,
@@ -78,7 +87,9 @@ export class JenkinsSCMProvider implements SCMReadProvider {
       base: {},
       head: { ref: reportedRef, sha: headSha },
       ...(pullRequest === undefined ? {} : { pullRequest }),
-      files,
+      files: files.files,
+      providerTruncated: files.truncated,
+      budgetGuard,
     });
   }
 
@@ -86,14 +97,17 @@ export class JenkinsSCMProvider implements SCMReadProvider {
     return this.getChangeEvidence(input);
   }
 
-  private async request(path: string): Promise<Response> {
+  private async request(path: string, budgetGuard: ReturnType<typeof createSCMBudgetGuard>): Promise<Response> {
+    budgetGuard.beginRequest();
     try {
-      return await this.#fetch(resolveSCMUrl(this.#baseUrl, path), {
+      const response = await this.#fetch(resolveSCMUrl(this.#baseUrl, path), {
         method: "GET",
         headers: { accept: "application/json", ...(this.#authorization === undefined ? {} : { authorization: this.#authorization }) },
         redirect: "error",
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(Math.min(10_000, budgetGuard.remainingMs)),
       });
+      budgetGuard.finishRequest();
+      return response;
     } catch { throw new SCMProviderError("unavailable"); }
   }
 }
@@ -150,8 +164,8 @@ function jenkinsSha(raw: Record<string, unknown>): string {
   throw new SCMProviderError("malformed");
 }
 
-function jenkinsFiles(value: unknown): RawSCMFile[] {
-  if (value === undefined) return [];
+function jenkinsFiles(value: unknown, maxFiles: number): { files: RawSCMFile[]; truncated: boolean } {
+  if (value === undefined) return { files: [], truncated: false };
   if (!Array.isArray(value)) throw new SCMProviderError("malformed");
   const files: RawSCMFile[] = [];
   for (const changeSet of value) {
@@ -168,11 +182,12 @@ function jenkinsFiles(value: unknown): RawSCMFile[] {
         if (path === null || typeof path !== "object" || Array.isArray(path) || typeof (path as Record<string, unknown>).file !== "string") throw new SCMProviderError("malformed");
         const file = path as Record<string, unknown>;
         const name = file.file as string;
+        if (files.length >= maxFiles) return { files, truncated: true };
         files.push({ path: name, status: jenkinsStatus(file.editType), binary: binaryPath(name) });
       }
     }
   }
-  return files;
+  return { files, truncated: files.length >= maxFiles };
 }
 
 function jenkinsPullRequest(value: unknown, expectedId: string, branch: string, sha: string): SCMPullRequest {
