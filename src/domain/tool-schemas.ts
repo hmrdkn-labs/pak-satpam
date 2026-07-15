@@ -35,6 +35,7 @@ export const ProviderClassSchema = z.enum([
   "fake",
   "grafana",
   "prometheus-compatible",
+  "grafana-alertmanager",
   "composite",
 ]);
 export const FreshnessSchema = z.enum(["fresh", "cached", "stale", "unknown"]);

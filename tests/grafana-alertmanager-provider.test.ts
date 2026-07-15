@@ -16,7 +16,7 @@ describe("Grafana embedded Alertmanager adapter", () => {
     ]), { headers: { "content-type": "application/json" } }));
     const provider = new VictoriaMetricsProvider({
       baseUrl: "https://prometheus.example",
-      alertsBaseUrl: "https://grafana.example",
+      alertsBaseUrl: "https://grafana.example/api/alertmanager/grafana",
       alertsProvider: "grafana-alertmanager",
       fetch,
       clock: () => NOW,
@@ -26,7 +26,7 @@ describe("Grafana embedded Alertmanager adapter", () => {
 
     const result = await provider.activeAlerts({ services: ["backend"] });
 
-    expect(result.providerClass).toBe("prometheus-compatible");
+    expect(result.providerClass).toBe("grafana-alertmanager");
     expect(result.data.alerts).toEqual([expect.objectContaining({
       alertId: "abc123",
       name: "BackendDown",

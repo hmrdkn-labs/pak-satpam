@@ -131,7 +131,7 @@ ci:
       .mockResolvedValueOnce(new Response(JSON.stringify({ number: 1, result: "SUCCESS", building: false, timestamp: FIXED_NOW.getTime() })));
     const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
     await runtime.provider.activeAlerts({});
-    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://grafana:3000/api/alertmanager/grafana/api/v2/alerts");
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://grafana:3000/api/v2/alerts");
     expect(runtime.ci?.provider.constructor.name).toBe("JenkinsProvider");
   });
 

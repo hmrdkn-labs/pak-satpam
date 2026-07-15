@@ -98,7 +98,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
     return CapabilitiesResultSchema.parse({
       ...this.evidence(),
       data: {
-        providerClasses: ["prometheus-compatible"],
+        providerClasses: [this.providerClass()],
         enabledTools: [
           "observability.capabilities",
           "observability.health_snapshot",
@@ -161,7 +161,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
     const request = ActiveAlertsInputSchema.parse(input);
     const observedAt = this.now();
     const grafanaAlertmanager = this.#options.alertsProvider === "grafana-alertmanager";
-    const payload = await this.requestJson(this.alertsBaseUrl, grafanaAlertmanager ? "api/alertmanager/grafana/api/v2/alerts" : "api/v1/alerts");
+    const payload = await this.requestJson(this.alertsBaseUrl, grafanaAlertmanager ? "api/v2/alerts" : "api/v1/alerts");
     if (payload === undefined) {
       return ActiveAlertsResultSchema.parse({
         ...this.evidence(observedAt, "unknown", [unavailableWarning()]),
@@ -262,7 +262,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
     path: string,
     parameters: Record<string, string> = {},
   ): Promise<unknown | undefined> {
-    const url = new URL(path, baseUrl);
+    const url = new URL(path.replace(/^\/+/, ""), baseUrl);
     for (const [key, value] of Object.entries(parameters)) url.searchParams.set(key, value);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -310,7 +310,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
     return {
       schemaVersion: SCHEMA_VERSION,
       observedAt,
-      providerClass: "prometheus-compatible" as const,
+      providerClass: this.providerClass(),
       freshness,
       truncated: false,
       redactionsApplied: false,
@@ -318,6 +318,11 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
     };
   }
 
+  private providerClass(): "prometheus-compatible" | "grafana-alertmanager" {
+    return this.#options.alertsProvider === "grafana-alertmanager"
+      ? "grafana-alertmanager"
+      : "prometheus-compatible";
+  }
   private now(): string {
     return this.clock().toISOString();
   }
