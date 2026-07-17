@@ -16,9 +16,49 @@ import {
 import { HermesDelivery, signHermesPayload } from "../src/observer/delivery.js";
 import type { ObserverConfig } from "../src/observer/config.js";
 import type { CIWorkflowRun } from "../src/domain/ci-schemas.js";
+import {
+  ANALYSIS_ACTION_PORTS,
+  ANALYSIS_RERUN_BOUNDARY,
+  ANALYSIS_TOOL_SURFACE,
+  boundAnalysisInput,
+  runBoundedRecommendationAnalysis,
+} from "../src/observer/analysis-policy.js";
+import {
+  EventCorrelationSchema,
+  ObserverEventEnvelopeSchema,
+  createObserverEventEnvelope,
+  observerEnvelopeDigest,
+  observerReplayKey,
+  serializeObserverEventEnvelope,
+} from "../src/observer/event-envelope.js";
 
 const NOW = new Date("2026-07-14T00:00:00.000Z");
 const SHA = "a".repeat(40);
+
+const policyBaseInput = {
+  event: { repository: "owner/repo", workflow: "build.yml", runId: "101", commitSha: "a".repeat(40) },
+  diff: [{ path: "src/check.ts", changeType: "modified" as const, additions: 2, deletions: 1, hunkCount: 1 }],
+  logs: ["Authorization: Bearer ghp_super-secret", "failure observed"],
+  metrics: [{ name: "http_requests_total", state: "error", value: 3, sampleCount: 4 }],
+  traces: [{ spanDigest: "b".repeat(64), durationMs: 12, status: "error" as const }],
+};
+
+const envelopeBase = {
+  eventId: "owner/repo:ci.yml:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:failure",
+  observedAt: "2026-07-14T00:00:00.000Z",
+  source: "poll" as const,
+  repo: "owner/repo",
+  workflow: "ci.yml",
+  runId: "101",
+  runAttempt: 1,
+  terminalConclusion: "failure",
+  outcome: "failure",
+  notification: "failure" as const,
+  severity: "red" as const,
+  threadId: "owner/repo:ci.yml",
+  freshness: "fresh" as const,
+  updatedAt: "2026-07-14T00:00:00.000Z",
+};
 
 function run(id: string, conclusion: CIWorkflowRun["conclusion"], updatedAt = NOW.toISOString()): CIWorkflowRun {
   return {
@@ -341,6 +381,49 @@ describe("portable observer runtime", () => {
     }
   });
 
+  it("persists webhook analysis dedupe identity across a restart before polling", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "observer-webhook-restart-"));
+    const statePath = join(directory, "state.json");
+    const candidate = run("86", "failure");
+    const eventId = `owner/repo:ci.yml:${SHA}:failure`;
+    try {
+      const firstDelivery = vi.fn().mockResolvedValue(undefined);
+      const first = new ObserverRuntime({
+        config: config({ stateFile: statePath }),
+        provider: provider(),
+        source: {
+          listTerminalRuns: vi.fn(),
+          webhookVerifier: { verify: vi.fn().mockResolvedValue([candidate]) },
+        },
+        state: new FileObserverStateStore({ filePath: statePath, leaseMs: 30_000, clock: () => NOW }),
+        deliver: firstDelivery,
+        clock: () => NOW,
+      });
+
+      await expect(first.ingestWebhook({ headers: {}, body: "signed" })).resolves.toMatchObject({ accepted: true, delivered: 2 });
+      expect(firstDelivery.mock.calls.map((call) => call[1])).toEqual([`${eventId}:status`, `${eventId}:analysis`]);
+      const statusEnvelope = JSON.parse(String(firstDelivery.mock.calls[0]?.[0])) as Record<string, unknown>;
+      expect(statusEnvelope).toMatchObject({ eventId, dedupeKey: eventId, replayKey: "owner/repo:ci.yml:86:1", identity: { dedupeKey: eventId, replayKey: "owner/repo:ci.yml:86:1" } });
+      expect(Object.values(new FileObserverStateStore({ filePath: statePath, leaseMs: 30_000, clock: () => NOW }).load().targets)[0]?.seen[eventId]).toMatchObject({ statusDelivery: "delivered", analysisDelivery: "delivered", analysisAttempted: true });
+
+      const secondDelivery = vi.fn().mockResolvedValue(undefined);
+      const second = new ObserverRuntime({
+        config: config({ stateFile: statePath }),
+        provider: provider(),
+        source: { listTerminalRuns: vi.fn().mockResolvedValue({ runs: [candidate], hasMore: false }) },
+        state: new FileObserverStateStore({ filePath: statePath, leaseMs: 30_000, clock: () => NOW }),
+        deliver: secondDelivery,
+        clock: () => NOW,
+      });
+
+      await expect(second.pollOnce()).resolves.toMatchObject({ delivered: 0, observed: [] });
+      expect(secondDelivery).not.toHaveBeenCalled();
+      expect(Object.values(new FileObserverStateStore({ filePath: statePath, leaseMs: 30_000, clock: () => NOW }).load().targets)[0]?.seen[eventId]).toMatchObject({ statusDelivery: "delivered", analysisDelivery: "delivered", analysisAttempted: true });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reads legacy run-id state without duplicating a delivered failure", async () => {
     const state = new InMemoryObserverStateStore();
     state.save({
@@ -544,6 +627,217 @@ describe("portable observer runtime", () => {
     now = new Date("2026-07-14T00:00:00.100Z");
     await runtime.pollOnce();
     expect(listWorkflowRuns.mock.calls.length).toBeGreaterThan(callsAfterFailure);
+  });
+});
+
+describe("Goal 23 bounded recommendation policy", () => {
+  it("passes only bounded, redacted evidence and the exact five-tool surface", () => {
+    const input = boundAnalysisInput({ ...policyBaseInput, logs: Array.from({ length: 200 }, () => "x".repeat(2_000)) }, { maxBytes: 4_096, maxLogLines: 3 });
+    expect(input.allowedTools).toEqual([...ANALYSIS_TOOL_SURFACE]);
+    expect(input.logs).toHaveLength(3);
+    expect(JSON.stringify(input)).not.toContain("ghp_super-secret");
+    expect(Buffer.byteLength(JSON.stringify(input))).toBeLessThanOrEqual(4_096);
+    expect(input).not.toHaveProperty("labels");
+    expect(input).not.toHaveProperty("traceId", "span-secret");
+  });
+
+  it("invokes one callback and strips adversarial authority fields", async () => {
+    const callback = vi.fn(async (_input, context) => {
+      expect(context.actionPorts).toEqual([]);
+      expect(context.rerun.available).toBe(false);
+      expect(context).not.toHaveProperty("provider");
+      expect(context).not.toHaveProperty("invoke");
+      return {
+        recommendations: [{ title: "Inspect the failing test", rationale: "Evidence is non-causal", steps: ["Review the runbook"], evidenceRefs: ["ci-status"] }],
+        status: "success",
+        deploy: true,
+        rollback: true,
+        rerun: true,
+      };
+    });
+    const result = await runBoundedRecommendationAnalysis({ input: policyBaseInput, callback });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback.mock.calls[0]?.[1]).toMatchObject({
+      allowedTools: ["ci.workflow_status", "ci.failed_job_analysis", "ci.log_evidence", "ci.remediation_plan", "ci.rerun_failed_workflow"],
+      actionPorts: ANALYSIS_ACTION_PORTS,
+      rerun: ANALYSIS_RERUN_BOUNDARY,
+    });
+    expect(callback.mock.calls[0]?.[1]).not.toHaveProperty("provider");
+    expect(result).toEqual(expect.objectContaining({ available: true, reason: "available" }));
+    expect(result).not.toHaveProperty("status");
+    expect(result).not.toHaveProperty("deploy");
+    expect(result).not.toHaveProperty("rollback");
+    expect(result).not.toHaveProperty("rerun");
+  });
+
+  it("returns deterministic timeout and unavailable fallbacks", async () => {
+    const timeout = await runBoundedRecommendationAnalysis({
+      input: policyBaseInput,
+      limits: { timeoutMs: 25 },
+      callback: async (_input, context) => new Promise((_resolve, reject) => {
+        context.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+    });
+    expect(timeout).toEqual({ available: false, reason: "timeout" });
+    expect(await runBoundedRecommendationAnalysis({ input: policyBaseInput })).toEqual({ available: false, reason: "unavailable" });
+  });
+
+  it("settles immediately when the external signal aborts an ignoring callback", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const callbackStarted = new Promise<void>((resolve) => { started = resolve; });
+    const analysis = runBoundedRecommendationAnalysis({
+      input: policyBaseInput,
+      limits: { timeoutMs: 5_000 },
+      signal: controller.signal,
+      callback: async () => {
+        started();
+        return new Promise<never>(() => {});
+      },
+    });
+    await callbackStarted;
+    controller.abort();
+    await expect(analysis).resolves.toEqual({ available: false, reason: "aborted" });
+  });
+
+  it("re-bounds schema-valid input against the requested byte and count limits", async () => {
+    const prebounded = boundAnalysisInput({ ...policyBaseInput, logs: Array.from({ length: 100 }, () => "x".repeat(512)) }, { maxBytes: 64 * 1024, maxLogLines: 100 });
+    const callback = vi.fn(async (input) => {
+      expect(input.logs).toHaveLength(3);
+      expect(Buffer.byteLength(JSON.stringify(input), "utf8")).toBeLessThanOrEqual(4_096);
+      return { title: "bounded", steps: [], evidenceRefs: [] };
+    });
+    await expect(runBoundedRecommendationAnalysis({ input: prebounded, callback, limits: { maxBytes: 4_096, maxLogLines: 3 } })).resolves.toMatchObject({ available: true });
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it("enforces maxBytes when scalar event metadata alone exceeds the requested bound", async () => {
+    const prebounded = boundAnalysisInput({
+      event: {
+        repository: "r".repeat(200),
+        workflow: "w".repeat(200),
+        runId: "i".repeat(64),
+        commitSha: "a".repeat(128),
+        deploymentId: "d".repeat(128),
+        traceId: "t".repeat(128),
+      },
+    }, { maxBytes: 64 * 1024 });
+    const callback = vi.fn(async (input) => {
+      expect(Buffer.byteLength(JSON.stringify(input), "utf8")).toBeLessThanOrEqual(1_024);
+      return { title: "bounded", steps: [], evidenceRefs: [] };
+    });
+    await expect(runBoundedRecommendationAnalysis({ input: prebounded, callback, limits: { maxBytes: 1_024 } })).resolves.toMatchObject({ available: true });
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes exact /mcp/ci metadata without provider or invokable authority ports", async () => {
+    let rerunInvoked = false;
+    const callback = vi.fn(async (_input, context) => {
+      expect(context.allowedTools).toEqual(["ci.workflow_status", "ci.failed_job_analysis", "ci.log_evidence", "ci.remediation_plan", "ci.rerun_failed_workflow"]);
+      expect(context.allowedTools).toEqual([...ANALYSIS_TOOL_SURFACE]);
+      expect(context.actionPorts).toEqual([]);
+      expect(context.actionPorts).toEqual(ANALYSIS_ACTION_PORTS);
+      expect(context).not.toHaveProperty("provider");
+      expect(context).not.toHaveProperty("status");
+      expect(context).not.toHaveProperty("deploy");
+      expect(context).not.toHaveProperty("rollback");
+      expect(context.rerun).toEqual(ANALYSIS_RERUN_BOUNDARY);
+      expect(context.rerun.available).toBe(false);
+      expect(context.rerun).not.toHaveProperty("invoke");
+      const possibleInvoke = (context.rerun as unknown as { invoke?: () => void }).invoke;
+      if (typeof possibleInvoke === "function") {
+        rerunInvoked = true;
+        possibleInvoke();
+      }
+      return {
+        title: "inspect failure",
+        rationale: "bounded evidence only",
+        steps: ["read the runbook"],
+        evidenceRefs: ["ci-status"],
+        status: "success",
+        transition: "recovery",
+        dedupeKey: "attacker-controlled",
+        route: "success",
+        deploy: true,
+        rollback: true,
+        rerun: { invoke: () => { rerunInvoked = true; } },
+      };
+    });
+    await expect(runBoundedRecommendationAnalysis({ input: policyBaseInput, callback })).resolves.toEqual({
+      available: true,
+      reason: "available",
+      recommendation: { title: "inspect failure", rationale: "bounded evidence only", steps: ["read the runbook"], evidenceRefs: ["ci-status"] },
+    });
+    expect(rerunInvoked).toBe(false);
+  });
+
+  it("caps aggregate recommendation text while retaining a nonempty title", async () => {
+    const result = await runBoundedRecommendationAnalysis({
+      input: policyBaseInput,
+      limits: { maxText: 32 },
+      callback: async () => ({ title: "inspect failure", rationale: "r".repeat(512), steps: ["s".repeat(512), "later step"], evidenceRefs: ["e".repeat(64), "later-ref"] }),
+    });
+    expect(result).toMatchObject({ available: true, reason: "available" });
+    const recommendation = result.recommendation;
+    expect(recommendation).toBeDefined();
+    const textualLength = (recommendation?.title.length ?? 0) + (recommendation?.rationale?.length ?? 0) + (recommendation?.steps.join("").length ?? 0) + (recommendation?.evidenceRefs.join("").length ?? 0);
+    expect(textualLength).toBeLessThanOrEqual(32);
+    expect(recommendation?.title.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Goal23 observer event envelope", () => {
+  it("normalizes stable dedupe/replay identity and truthful correlation markers", () => {
+    const envelope = createObserverEventEnvelope({ ...envelopeBase, correlation: { commitSha: "a".repeat(40) } });
+    expect(envelope.eventId).toBe(envelopeBase.eventId);
+    expect(envelope.dedupeKey).toBe(envelopeBase.eventId);
+    expect(envelope.replayKey).toBe(observerReplayKey({ repo: envelopeBase.repo, workflow: envelopeBase.workflow, runId: envelopeBase.runId, runAttempt: 1 }));
+    expect(envelope.correlation).toEqual({ deploymentId: { available: false, reason: "absent" }, commitSha: { available: true, value: "a".repeat(40) }, artifactDigest: { available: false, reason: "absent" }, traceId: { available: false, reason: "absent" } });
+    expect(ObserverEventEnvelopeSchema.parse(envelope)).toEqual(envelope);
+    expect(EventCorrelationSchema.parse(envelope.correlation)).toEqual(envelope.correlation);
+  });
+
+  it("keeps identity stable across poll and webhook and gives deterministic digest", () => {
+    const poll = createObserverEventEnvelope(envelopeBase);
+    const webhook = createObserverEventEnvelope({ ...envelopeBase, source: "webhook" });
+    expect(poll.identity).toEqual(webhook.identity);
+    expect(observerEnvelopeDigest(poll)).toBe(observerEnvelopeDigest(poll));
+    expect(observerEnvelopeDigest(poll)).not.toBe(observerEnvelopeDigest(webhook));
+  });
+
+  it("rejects caller-controlled dedupe and replay identity overrides", () => {
+    expect(() => createObserverEventEnvelope({ ...envelopeBase, dedupeKey: "attacker-controlled" })).toThrow("event_envelope_malformed");
+    expect(() => createObserverEventEnvelope({ ...envelopeBase, replayKey: "attacker-controlled" })).toThrow("event_envelope_malformed");
+    const matching = createObserverEventEnvelope({ ...envelopeBase, dedupeKey: envelopeBase.eventId, replayKey: observerReplayKey(envelopeBase) });
+    expect(matching.identity).toEqual({ dedupeKey: envelopeBase.eventId, replayKey: observerReplayKey(envelopeBase) });
+  });
+
+  it.each([
+    ["missing", { ...envelopeBase, repo: "" }],
+    ["secret", { ...envelopeBase, workflow: "Authorization: Bearer ghp_secret" }],
+    ["malformed correlation", { ...envelopeBase, correlation: { commitSha: "not-a-sha" } }],
+    ["malformed structured correlation", { ...envelopeBase, correlation: { commitSha: { available: true, value: "not-a-sha" } } }],
+  ])("rejects %s input", (_label, value) => {
+    expect(() => createObserverEventEnvelope(value as Parameters<typeof createObserverEventEnvelope>[0])).toThrow(/event_envelope_/);
+  });
+
+  it("rejects oversized serialization without leaking the payload", () => {
+    const envelope = createObserverEventEnvelope({ ...envelopeBase, warnings: [{ code: "bounded", message: "x".repeat(500) }] });
+    expect(() => serializeObserverEventEnvelope(envelope, 256)).toThrow("event_envelope_too_large");
+  });
+
+  it("rejects webhook signing secrets in adversarial fields without exposing them", () => {
+    const secret = "whsec_adversarial_signing_secret_123";
+    const adversarial = { ...envelopeBase, webhookSigningSecret: secret } as unknown as Parameters<typeof createObserverEventEnvelope>[0];
+    let error: unknown;
+    try {
+      createObserverEventEnvelope(adversarial);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toBe("Error: event_envelope_secret");
+    expect(String(error)).not.toContain(secret);
   });
 });
 
@@ -754,5 +1048,208 @@ describe("observer state and Hermes delivery", () => {
     await runtime.pollOnce();
     expect(runtime.health()).toMatchObject({ status: "ok" });
     expect(runtime.health().metrics).not.toHaveProperty("lastError");
+  });
+
+  it("emits deterministic status before one bounded adversarial recommendation", async () => {
+    const callback = vi.fn().mockResolvedValue({
+      title: "inspect failure",
+      rationale: "bounded evidence only",
+      steps: ["read the runbook"],
+      evidenceRefs: ["ci-status"],
+      status: "success",
+      deploy: true,
+      rollback: true,
+      rerun: true,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const runtime = new ObserverRuntime({
+      config: config(),
+      provider: provider({ listWorkflowRuns: vi.fn().mockResolvedValue({ runs: [run("goal23", "failure")], hasMore: false }) }),
+      state: new InMemoryObserverStateStore(),
+      deliver,
+      recommendationAnalysis: callback,
+      clock: () => NOW,
+    });
+
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2 });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0]?.[2]).toBe("success");
+    expect(JSON.parse(String(deliver.mock.calls[0]?.[0]))).toMatchObject({ status: { outcome: "failure" }, outcome: "failure" });
+    const analysis = JSON.parse(String(deliver.mock.calls[1]?.[0])) as Record<string, unknown>;
+    expect(analysis).toHaveProperty("recommendation.available", true);
+    expect(analysis).not.toHaveProperty("deploy");
+    expect(analysis).not.toHaveProperty("rollback");
+    expect(analysis).not.toHaveProperty("rerun");
+  });
+
+  it("maps bounded diff, log, metric, and trace evidence into callback metadata", async () => {
+    const callback = vi.fn().mockImplementation(async (input) => {
+      expect(input.diff).toEqual([{ path: "src/check.ts", changeType: "modified", additions: 2, deletions: 1, hunkCount: 1 }]);
+      expect(input.logs).toEqual([{ sequence: 0, text: "CI log evidence ci-log-9 (1 lines)" }]);
+      expect(input.metrics).toEqual([{ name: "http-errors", state: "error", sampleCount: 0 }]);
+      expect(input.traces).toEqual([{ spanDigest: createHash("sha256").update("span-9").digest("hex"), durationMs: 0, status: "error" }]);
+      return { title: "inspect bounded evidence", steps: [], evidenceRefs: ["ci-log-9"] };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const runtime = new ObserverRuntime({
+      config: config(),
+      provider: provider({
+        listWorkflowRuns: vi.fn().mockResolvedValue({ runs: [run("goal23-evidence", "failure")], hasMore: false }),
+        forensics: {
+          scm: { getChangeEvidence: vi.fn().mockResolvedValue({ schemaVersion: "1.0", observedAt: NOW.toISOString(), providerClass: "scm", freshness: "fresh", truncated: false, redactionsApplied: false, warnings: [], data: { available: true, changes: [{ path: "src/check.ts", changeType: "modified", additions: 2, deletions: 1, hunks: [{ header: "@@", lines: ["+check"] }] }] } }) },
+          telemetry: { getTelemetryCorrelation: vi.fn().mockResolvedValue({ schemaVersion: "1.0", observedAt: NOW.toISOString(), providerClass: "telemetry", freshness: "fresh", truncated: false, redactionsApplied: false, warnings: [], data: { available: true, signals: [{ id: "http-errors", kind: "metric", state: "error", summary: "errors", observedAt: NOW.toISOString() }, { id: "trace-9", kind: "trace", state: "error", summary: "failed span", reference: "span-9", observedAt: NOW.toISOString() }] } }) },
+        },
+      }),
+      state: new InMemoryObserverStateStore(),
+      deliver,
+      recommendationAnalysis: callback,
+      clock: () => NOW,
+    });
+
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2 });
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it("contains recommendation timeout without changing failure status or state", async () => {
+    const callback = vi.fn().mockImplementation(async (_input, context) => new Promise((_resolve, reject) => {
+      context.signal.addEventListener("abort", () => reject(new Error("timeout")), { once: true });
+    }));
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const runtime = new ObserverRuntime({
+      config: config(),
+      provider: provider({ listWorkflowRuns: vi.fn().mockResolvedValue({ runs: [run("goal23-timeout", "failure")], hasMore: false }) }),
+      state: new InMemoryObserverStateStore(),
+      deliver,
+      recommendationAnalysis: callback,
+      recommendationLimits: { timeoutMs: 10 },
+      clock: () => NOW,
+    });
+
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2, errors: [] });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(deliver.mock.calls[0]?.[0]))).toMatchObject({ outcome: "failure", status: { outcome: "failure" } });
+    expect(JSON.parse(String(deliver.mock.calls[1]?.[0]))).toHaveProperty("recommendation.reason", "timeout");
+  });
+
+  it("bounds a hung forensics provider after delivering status and one unavailable analysis", async () => {
+    const callback = vi.fn();
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const ci = provider({
+      listWorkflowRuns: vi.fn().mockResolvedValue({ runs: [run("goal23-hung-provider", "failure")], hasMore: false }),
+      getFailedJobAnalysis: (() => new Promise<never>(() => {})) as NonNullable<ObserverProvider["getFailedJobAnalysis"]>,
+    });
+    const runtime = new ObserverRuntime({
+      config: config(),
+      provider: ci,
+      state: new InMemoryObserverStateStore(),
+      deliver,
+      recommendationAnalysis: callback,
+      recommendationLimits: { timeoutMs: 20 },
+      clock: () => NOW,
+    });
+
+    const startedAt = Date.now();
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2, errors: [] });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["success", "analysis"]);
+    const analysis = JSON.parse(String(deliver.mock.calls[1]?.[0])) as Record<string, unknown>;
+    expect(analysis).toHaveProperty("analysis.freshness", "unknown");
+    expect(analysis).toHaveProperty("analysis.data.provenance[0].unavailable", true);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("keeps transition, dedupe, status, and delivery routing deterministic despite adversarial output", async () => {
+    let currentRun = run("goal23-failure", "failure");
+    const source = { listTerminalRuns: vi.fn().mockImplementation(async () => ({ runs: [currentRun], hasMore: false })) };
+    const rerunFailedWorkflow = vi.fn<ObserverProvider["rerunFailedWorkflow"]>();
+    const callback = vi.fn().mockResolvedValue({
+      title: "inspect failure",
+      rationale: "bounded evidence only",
+      steps: ["read the runbook"],
+      evidenceRefs: ["ci-status"],
+      status: "success",
+      transition: "recovery",
+      dedupeKey: "attacker-controlled",
+      route: "success",
+      deploy: true,
+      rollback: true,
+      rerun: { invoke: () => undefined },
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const state = new InMemoryObserverStateStore();
+    const runtime = new ObserverRuntime({
+      config: config({ maxPages: 1 }),
+      provider: provider({ rerunFailedWorkflow }),
+      source,
+      state,
+      deliver,
+      recommendationAnalysis: callback,
+      clock: () => NOW,
+    });
+
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2, observed: [{ outcome: "failure" }] });
+    currentRun = run("goal23-failure", "failure");
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 0, observed: [] });
+    currentRun = run("goal23-recovery", "success");
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 1, observed: [{ outcome: "success" }] });
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(rerunFailedWorkflow).not.toHaveBeenCalled();
+    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["success", "analysis", "success"]);
+
+    const status = JSON.parse(String(deliver.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(status).toMatchObject({
+      eventId: `owner/repo:ci.yml:${SHA}:failure`,
+      dedupeKey: `owner/repo:ci.yml:${SHA}:failure`,
+      outcome: "failure",
+      notification: "failure",
+      severity: "red",
+      status: { state: "completed", conclusion: "failure", outcome: "failure" },
+    });
+    expect(status).not.toHaveProperty("deploy");
+    expect(status).not.toHaveProperty("rollback");
+    expect(status).not.toHaveProperty("rerun");
+
+    const analysis = JSON.parse(String(deliver.mock.calls[1]?.[0])) as Record<string, unknown>;
+    expect(analysis).toMatchObject({
+      type: "ci.failure.analysis",
+      eventId: `owner/repo:ci.yml:${SHA}:failure`,
+      dedupeKey: `owner/repo:ci.yml:${SHA}:failure`,
+      recommendation: { available: true, reason: "available" },
+    });
+    expect(analysis).not.toHaveProperty("status");
+    expect(analysis).not.toHaveProperty("transition");
+    expect(analysis).not.toHaveProperty("route");
+    expect(analysis).not.toHaveProperty("deploy");
+    expect(analysis).not.toHaveProperty("rollback");
+    expect(analysis).not.toHaveProperty("rerun");
+    expect(analysis.recommendation).toEqual({
+      available: true,
+      reason: "available",
+      recommendation: {
+        title: "inspect failure",
+        rationale: "bounded evidence only",
+        steps: ["read the runbook"],
+        evidenceRefs: ["ci-status"],
+      },
+    });
+
+    const recovery = JSON.parse(String(deliver.mock.calls[2]?.[0])) as Record<string, unknown>;
+    expect(recovery).toMatchObject({
+      eventId: `owner/repo:ci.yml:${SHA}:success`,
+      dedupeKey: `owner/repo:ci.yml:${SHA}:success`,
+      outcome: "success",
+      notification: "recovery",
+      severity: "green",
+      status: { state: "completed", conclusion: "success", outcome: "success" },
+    });
+
+    const targetState = Object.values(state.load().targets)[0];
+    expect(targetState?.incidentActive).toBe(false);
+    expect(targetState?.seen[`owner/repo:ci.yml:${SHA}:failure`]).toMatchObject({
+      statusDelivery: "delivered",
+      analysisAttempted: true,
+      analysisDelivery: "delivered",
+    });
   });
 });

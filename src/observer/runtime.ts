@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 import { CIRepositorySchema, CIRunIdSchema, CIWorkflowSchema, type CIWorkflowRun } from "../domain/ci-schemas.js";
 import { redactMetadata } from "../ci/redaction.js";
@@ -12,6 +12,9 @@ import { HttpDeliverySink, type ObserverDeliveryRoute, type ObserverDeliverySink
 import { observerEventSourceFromProvider, type ObserverEventSource, type ObserverEventSourceKind, type ObserverRunListInput, type ObserverWebhookRequest } from "./events.js";
 import { createObserverEventSourceFromProviderConfiguration, createObserverProviderFromConfiguration } from "./provider-factory.js";
 import { FileObserverStateStore, type ObserverSeenRecord, type ObserverStateDocument, type ObserverStateStore, type ObserverTargetState } from "./state.js";
+import { createObserverEventEnvelope, observerReplayKey, serializeObserverEventEnvelope, type EventCorrelation } from "./event-envelope.js";
+import type { CIFailureAnalysisResult } from "../domain/forensics-schemas.js";
+import { DEFAULT_ANALYSIS_POLICY_LIMITS, runBoundedRecommendationAnalysis, type AnalysisCallback, type AnalysisPolicyLimits } from "./analysis-policy.js";
 
 export type ObserverOutcome = "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "neutral" | "stale" | "unavailable" | "malformed";
 
@@ -25,6 +28,9 @@ export interface ObserverEvent {
   readonly schemaVersion: "1.0";
   readonly type: "ci.run.observed";
   readonly eventId: string;
+  readonly dedupeKey: string;
+  readonly replayKey: string;
+  readonly identity: { readonly dedupeKey: string; readonly replayKey: string };
   readonly observedAt: string;
   readonly source: ObserverEventSourceKind;
   readonly providerClass?: string;
@@ -34,11 +40,13 @@ export interface ObserverEvent {
   readonly runAttempt: number;
   readonly terminalConclusion: CIWorkflowRun["conclusion"];
   readonly outcome: ObserverOutcome;
+  readonly status: { readonly state: "completed"; readonly conclusion: Exclude<CIWorkflowRun["conclusion"], null>; readonly outcome: ObserverOutcome };
   readonly notification: "failure" | "recovery";
   readonly severity: "red" | "green";
   readonly threadId: string;
   readonly freshness: "fresh" | "stale";
   readonly updatedAt: string;
+  readonly correlation: EventCorrelation;
   readonly analysis?: unknown;
   readonly evidence?: readonly unknown[];
   readonly remediation?: unknown;
@@ -142,6 +150,8 @@ export class ObserverRuntime {
   readonly #deliver: (body: string, eventId: string, route?: ObserverDeliveryRoute) => Promise<unknown>;
   readonly #clock: () => Date;
   readonly #metrics: InMemoryObserverMetrics;
+  readonly #recommendationAnalysis: AnalysisCallback | undefined;
+  readonly #recommendationLimits: Partial<AnalysisPolicyLimits> | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling = false;
 
@@ -154,6 +164,8 @@ export class ObserverRuntime {
     sink?: ObserverDeliverySink;
     clock?: () => Date;
     metrics?: InMemoryObserverMetrics;
+    recommendationAnalysis?: AnalysisCallback;
+    recommendationLimits?: Partial<AnalysisPolicyLimits>;
   }) {
     this.#config = options.config;
     this.#provider = options.provider;
@@ -163,6 +175,8 @@ export class ObserverRuntime {
     this.#deliver = options.deliver ?? ((body, eventId, route) => options.sink!.deliver(body, eventId, route));
     this.#clock = options.clock ?? (() => new Date());
     this.#metrics = options.metrics ?? new InMemoryObserverMetrics();
+    this.#recommendationAnalysis = options.recommendationAnalysis;
+    this.#recommendationLimits = options.recommendationLimits;
   }
 
   get metrics(): InMemoryObserverMetrics { return this.#metrics; }
@@ -590,6 +604,10 @@ export class ObserverRuntime {
     const warnings: Array<{ code: string; message: string }> = [];
     if (includeAnalysis && isAnalysisConclusion(run.conclusion)) {
       const input = { repo: run.repository, workflow: run.workflow, runId: run.id };
+      const timeoutMs = this.#recommendationLimits?.timeoutMs ?? DEFAULT_ANALYSIS_POLICY_LIMITS.timeoutMs;
+      const deadline = Date.now() + timeoutMs;
+      const deadlineController = new AbortController();
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         const observerStatusProvider = {
           ...this.#provider,
@@ -604,19 +622,50 @@ export class ObserverRuntime {
             data: { run },
           }),
         };
-        const assembled = await assembleFailureAnalysis({
-          provider: observerStatusProvider,
-          ...(this.#provider.forensics === undefined ? {} : { evidence: this.#provider.forensics }),
-          input: { ...input, maxJobs: this.#config.maxFailedJobs, maxLogLines: this.#config.maxLogLines },
-          clock: () => now,
+        const deadlineFailure = new Promise<never>((_, reject) => {
+          deadlineTimer = setTimeout(() => {
+            deadlineController.abort();
+            reject(new Error("failure analysis deadline exceeded"));
+          }, timeoutMs);
         });
-        return buildAgentNotificationPayload({ analysis: assembled, eventId, source, maxBytes: this.#config.maxPayloadBytes });
-      } catch (error) {
-        const fallback = makeUnavailableFailureAnalysis({ run: { ...run, status: "completed" }, observedAt: now, ...(this.#source.providerClass === undefined ? {} : { providerClass: this.#source.providerClass }), code: providerErrorOutcome(error) });
-        return buildAgentNotificationPayload({ analysis: fallback, eventId, source, maxBytes: this.#config.maxPayloadBytes });
+        let assembled: CIFailureAnalysisResult;
+        try {
+          assembled = await Promise.race([
+            assembleFailureAnalysis({
+              provider: observerStatusProvider,
+              ...(this.#provider.forensics === undefined ? {} : { evidence: this.#provider.forensics }),
+              input: { ...input, maxJobs: this.#config.maxFailedJobs, maxLogLines: this.#config.maxLogLines },
+              clock: () => now,
+            }),
+            deadlineFailure,
+          ]);
+        } catch (error) {
+          assembled = makeUnavailableFailureAnalysis({ run: { ...run, status: "completed" }, observedAt: now, ...(this.#source.providerClass === undefined ? {} : { providerClass: this.#source.providerClass }), code: providerErrorOutcome(error) });
+        }
+
+        const payload = buildAgentNotificationPayload({ analysis: assembled, eventId, source, maxBytes: this.#config.maxPayloadBytes });
+        if (this.#recommendationAnalysis === undefined) return payload;
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          deadlineController.abort();
+          return { ...payload, recommendation: { available: false, reason: "timeout" } } as AgentNotificationPayload;
+        }
+        const recommendation = await runBoundedRecommendationAnalysis({
+          input: recommendationInputForAnalysis(assembled),
+          callback: this.#recommendationAnalysis,
+          signal: deadlineController.signal,
+          limits: { ...this.#recommendationLimits, timeoutMs: Math.max(1, Math.min(timeoutMs, remainingMs)) },
+        });
+        const boundedRecommendation = recommendation.reason === "aborted" && Date.now() >= deadline
+          ? { ...recommendation, reason: "timeout" as const }
+          : recommendation;
+        return { ...payload, recommendation: boundedRecommendation } as AgentNotificationPayload;
+      } finally {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       }
     }
-    return {
+    const event = {
       schemaVersion: "1.0",
       type: "ci.run.observed",
       eventId,
@@ -629,13 +678,27 @@ export class ObserverRuntime {
       runAttempt: run.runAttempt,
       terminalConclusion: run.conclusion,
       outcome,
+      status: { state: "completed" as const, conclusion: run.conclusion ?? "unknown", outcome },
       notification,
       severity: notification === "recovery" ? "green" : "red",
       threadId: observerThreadId(run),
       freshness: outcome === "stale" ? "stale" : "fresh",
       updatedAt: run.updatedAt,
+      dedupeKey: eventId,
+      replayKey: observerReplayKey({ repo: run.repository, workflow: run.workflow, runId: run.id, runAttempt: run.runAttempt }),
+      identity: {
+        dedupeKey: eventId,
+        replayKey: observerReplayKey({ repo: run.repository, workflow: run.workflow, runId: run.id, runAttempt: run.runAttempt }),
+      },
+      correlation: {
+        deploymentId: { available: false as const, reason: "absent" as const },
+        commitSha: { available: true as const, value: run.sha },
+        artifactDigest: { available: false as const, reason: "absent" as const },
+        traceId: { available: false as const, reason: "absent" as const },
+      },
       warnings,
     };
+    return createObserverEventEnvelope(event as unknown as import("./event-envelope.js").ObserverEventEnvelopeInput) as unknown as ObserverEvent;
   }
 }
 
@@ -837,6 +900,38 @@ function outcomeForProviderError(error: unknown): "unavailable" | "malformed" {
 
 const providerErrorOutcome = outcomeForProviderError;
 
+function recommendationInputForAnalysis(analysis: CIFailureAnalysisResult) {
+  return {
+    event: {
+      repository: analysis.data.subject.repo,
+      workflow: analysis.data.subject.workflow,
+      runId: analysis.data.subject.runId,
+      commitSha: analysis.data.subject.headSha,
+    },
+    diff: analysis.data.scmChanges.map((change) => ({
+      path: change.path,
+      changeType: change.changeType,
+      additions: change.additions,
+      deletions: change.deletions,
+      hunkCount: change.hunks.length,
+    })),
+    logs: analysis.data.ciEvidence.map((evidence, sequence) => ({
+      sequence,
+      text: `CI log evidence ${evidence.evidenceRef} (${evidence.lineCount} lines)`,
+    })),
+    metrics: analysis.data.telemetrySignals
+      .filter((signal) => signal.kind === "metric")
+      .map((signal) => ({ name: signal.id, state: signal.state })),
+    traces: analysis.data.telemetrySignals
+      .filter((signal) => signal.kind === "trace")
+      .map((signal) => ({
+        spanDigest: createHash("sha256").update(signal.reference ?? signal.id, "utf8").digest("hex"),
+        durationMs: 0,
+        status: (signal.state === "error" ? "error" : signal.state === "normal" ? "ok" : "unknown") as "error" | "ok" | "unknown",
+      })),
+  };
+}
+
 function isProviderBackoffError(error: unknown): boolean {
   if (error instanceof CIProviderError) return error.code === "unavailable";
   if (error === null || typeof error !== "object") return false;
@@ -872,18 +967,24 @@ function withoutBackoff(target: ObserverTargetState): ObserverTargetState {
 }
 
 function serializeObserverEvent(event: ObserverEvent | AgentNotificationPayload, maxBytes: number): string {
-  const redacted = redactMetadata(event) as Record<string, unknown>;
+  if ((event as { type?: string }).type === "ci.run.observed") {
+    // Runtime validation is the final boundary before a status delivery. The
+    // serializer rejects malformed, secret-bearing, or oversized envelopes.
+    return serializeObserverEventEnvelope(event as unknown as import("./event-envelope.js").ObserverEventEnvelopeInput, maxBytes);
+  }
+  const analysisEvent = event as AgentNotificationPayload;
+  const redacted = redactMetadata(analysisEvent) as Record<string, unknown>;
   let body = JSON.stringify(redacted);
   if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
-  if (event.type === "ci.failure.analysis") {
+  if (analysisEvent.type === "ci.failure.analysis") {
     return JSON.stringify({
       schemaVersion: "1.0",
-      type: event.type,
-      eventId: event.eventId,
-      dedupeKey: event.dedupeKey,
-      source: event.source,
-      observedAt: event.observedAt,
-      outcome: event.outcome,
+      type: analysisEvent.type,
+      eventId: analysisEvent.eventId,
+      dedupeKey: analysisEvent.dedupeKey,
+      source: analysisEvent.source,
+      observedAt: analysisEvent.observedAt,
+      outcome: analysisEvent.outcome,
       truncated: true,
       warnings: [{ code: "payload_truncated", message: "Bounded analysis omitted" }],
     });
@@ -892,24 +993,25 @@ function serializeObserverEvent(event: ObserverEvent | AgentNotificationPayload,
   redacted.warnings = [...(Array.isArray(redacted.warnings) ? redacted.warnings : []), { code: "payload_truncated", message: "Bounded evidence omitted" }];
   body = JSON.stringify(redacted);
   if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
+  const statusEvent = event as ObserverEvent;
   return JSON.stringify({
     schemaVersion: "1.0",
     type: "ci.run.observed",
-    eventId: event.eventId,
-    observedAt: event.observedAt,
-    source: event.source,
-    ...(event.providerClass === undefined ? {} : { providerClass: event.providerClass }),
-    repo: event.repo,
-    workflow: event.workflow,
-    runId: event.runId,
-    runAttempt: event.runAttempt,
-    terminalConclusion: event.terminalConclusion,
-    outcome: event.outcome,
-    notification: event.notification,
-    severity: event.severity,
-    threadId: event.threadId,
-    freshness: event.freshness,
-    updatedAt: event.updatedAt,
+    eventId: statusEvent.eventId,
+    observedAt: statusEvent.observedAt,
+    source: statusEvent.source,
+    ...(statusEvent.providerClass === undefined ? {} : { providerClass: statusEvent.providerClass }),
+    repo: statusEvent.repo,
+    workflow: statusEvent.workflow,
+    runId: statusEvent.runId,
+    runAttempt: statusEvent.runAttempt,
+    terminalConclusion: statusEvent.terminalConclusion,
+    outcome: statusEvent.outcome,
+    notification: statusEvent.notification,
+    severity: statusEvent.severity,
+    threadId: statusEvent.threadId,
+    freshness: statusEvent.freshness,
+    updatedAt: statusEvent.updatedAt,
     warnings: [{ code: "payload_truncated", message: "Bounded evidence omitted" }],
   });
 }

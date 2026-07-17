@@ -1,6 +1,6 @@
 {
   "name": "@hmrdkn-labs/pak-satpam",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Pak Satpam: bounded observability and approval-gated CI evidence for AI agents",
   "mcpName": "io.github.hmrdkn-labs/pak-satpam",
   "repository": {

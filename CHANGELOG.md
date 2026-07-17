@@ -3,6 +3,14 @@
 All notable changes to Pak Satpam are documented here. A changelog entry is not
 a publication receipt.
 
+## [0.2.4] - 2026-07-17
+
+- Add the Goal 23 provider-neutral event envelope with deterministic replay,
+  correlation, redaction, and validation boundaries.
+- Bound one recommendation across failure evidence collection and analysis,
+  while keeping status, routing, deployment, rollback, and rerun authority in
+  deterministic code.
+
 ## [0.2.3] - 2026-07-15
 
 - Restore the private compatibility boundary by keeping ordinary CI read profiles on the legacy five-tool surface and exposing failure analysis only with a validated explicit forensics provider.
