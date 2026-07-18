@@ -4,6 +4,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { CIRepositorySchema, CIRunIdSchema, CIWorkflowSchema, type CIWorkflowRun } from "../domain/ci-schemas.js";
 import { redactMetadata } from "../ci/redaction.js";
 import { CIProviderError, type CIProvider } from "../providers/ci-provider.js";
+import { normalizeGitHubActionsEvent } from "../providers/provider-event-adapters.js";
 import { assembleFailureAnalysis, buildAgentNotificationPayload, makeUnavailableFailureAnalysis, type AgentNotificationPayload } from "../ci/forensics.js";
 import type { ForensicsProviderSet } from "../providers/ci-provider.js";
 import { loadObserverConfiguration, observerRuntimeConfig, readObserverSecretFile, type ObserverConfig } from "./config.js";
@@ -775,36 +776,14 @@ function headerValue(headers: Readonly<Record<string, string | readonly string[]
 }
 
 function normalizeGitHubWorkflowRun(payload: unknown, allowlist: readonly { repo: string; workflows: readonly string[] }[]): Record<string, unknown> | undefined {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid webhook");
-  const root = payload as Record<string, unknown>;
-  const workflowRun = root.workflow_run;
-  const repository = root.repository;
-  if (workflowRun === null || typeof workflowRun !== "object" || Array.isArray(workflowRun) || repository === null || typeof repository !== "object" || Array.isArray(repository)) throw new Error("Invalid webhook");
-  const run = workflowRun as Record<string, unknown>;
-  const repo = (repository as Record<string, unknown>).full_name;
-  const workflow = workflowName(run, root.workflow);
-  if (typeof repo !== "string" || typeof workflow !== "string" || !allowlist.some((entry) => entry.repo === repo && entry.workflows.includes(workflow))) return undefined;
-  if (run.status !== "completed") return undefined;
-  const id = typeof run.id === "number" ? String(run.id) : run.id;
-  const conclusion = run.conclusion;
-  const runAttempt = run.run_attempt;
-  const event = run.event;
-  const ref = run.head_branch;
-  const sha = run.head_sha;
-  const createdAt = run.created_at;
-  const updatedAt = run.updated_at;
-  if (typeof id !== "string" || typeof runAttempt !== "number" || typeof event !== "string" || typeof ref !== "string" || typeof sha !== "string" || typeof createdAt !== "string" || typeof updatedAt !== "string") throw new Error("Invalid webhook");
-  if (conclusion !== null && conclusion !== "success" && conclusion !== "failure" && conclusion !== "cancelled" && conclusion !== "timed_out" && conclusion !== "skipped" && conclusion !== "neutral" && conclusion !== "action_required" && conclusion !== "unknown") throw new Error("Invalid webhook");
-  return { id, repository: repo, workflow, status: "completed", conclusion: conclusion as string | null, runAttempt, event, ref, sha: sha.toLowerCase(), createdAt, updatedAt };
-}
-
-function workflowName(run: Record<string, unknown>, workflow: unknown): string | undefined {
-  const candidates = [run.path, workflow !== null && typeof workflow === "object" && !Array.isArray(workflow) ? (workflow as Record<string, unknown>).path : undefined, run.name];
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string" || candidate.length === 0) continue;
-    return candidate.replace(/^\/?\.github\/workflows\//, "");
+  let run: CIWorkflowRun;
+  try {
+    run = normalizeGitHubActionsEvent(payload, { source: "webhook", includeGoal23Envelope: false }).run;
+  } catch {
+    throw new Error("Invalid webhook");
   }
-  return undefined;
+  if (!allowlist.some((entry) => entry.repo === run.repository && entry.workflows.includes(run.workflow))) return undefined;
+  return run.status === "completed" ? run : undefined;
 }
 
 export { observerEventSourceFromProvider } from "./events.js";

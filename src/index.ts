@@ -34,3 +34,5 @@ export {
   renderSyntheticDashboard,
   renderSyntheticPanel,
 } from "./visuals/synthetic-renderer.js";
+export * from "./domain/provider-event-schemas.js";
+export * from "./providers/provider-event-adapters.js";
