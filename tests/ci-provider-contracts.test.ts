@@ -1,3 +1,6 @@
+import { BitbucketProvider } from "../src/providers/bitbucket-provider.js";
+import { GitHubActionsProvider } from "../src/providers/github-actions-provider.js";
+import { JenkinsProvider } from "../src/providers/jenkins-provider.js";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,6 +22,18 @@ const readProvider = (): CIReadProvider => ({
 });
 
 describe("provider-neutral CI contracts", () => {
+  it("uses provider-owned workflow identity matching", () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const jenkins = new JenkinsProvider({ baseUrl: "https://jenkins.example", fetch });
+    const github = new GitHubActionsProvider({ token: "github-token-long-enough", fetch });
+    const bitbucket = new BitbucketProvider({ baseUrl: "https://bitbucket.example/2.0", token: "reader:token", fetch });
+
+    expect(jenkins.matchesWorkflow("planpalasix-config", "planpalasix-config/main")).toBe(true);
+    expect(jenkins.matchesWorkflow("planpalasix-config", "planpalasix-config/PR-9")).toBe(true);
+    expect(jenkins.matchesWorkflow("planpalasix-config", "other-folder/main")).toBe(false);
+    expect(github.matchesWorkflow("ci.yml", "ci.yml/x")).toBe(false);
+    expect(bitbucket.matchesWorkflow("build", "build/x")).toBe(false);
+  });
   it("uses one canonical provider-name schema for wire and registry identities", () => {
     expect(CIProviderClassSchema.safeParse("teamcity-primary").success).toBe(true);
     expect(CIProviderClassSchema.safeParse("TeamCity-primary").success).toBe(false);

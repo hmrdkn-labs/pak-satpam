@@ -18,10 +18,20 @@ export function createCIAllowlist(workflowsByRepository: Record<string, readonly
   };
 }
 
-export function isCIResourceAllowed(policy: CIAllowlist, repo: string, workflow: string): boolean {
-  return policy.workflowsByRepository[repo]?.includes(workflow) ?? false;
+export function isCIResourceAllowed(
+  policy: CIAllowlist,
+  repo: string,
+  workflow: string,
+  matches: (allowlistEntry: string, workflow: string) => boolean,
+): boolean {
+  return policy.workflowsByRepository[repo]?.some((allowlistEntry) => matches(allowlistEntry, workflow)) ?? false;
 }
 
-export function assertCIResourceAllowed(policy: CIAllowlist, repo: string, workflow: string): void {
-  if (!isCIResourceAllowed(policy, repo, workflow)) throw new Error("ci_policy_denied");
+export function assertCIResourceAllowed(
+  policy: CIAllowlist,
+  repo: string,
+  workflow: string,
+  matches: (allowlistEntry: string, workflow: string) => boolean,
+): void {
+  if (!isCIResourceAllowed(policy, repo, workflow, matches)) throw new Error("ci_policy_denied");
 }

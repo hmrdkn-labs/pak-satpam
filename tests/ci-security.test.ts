@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   FileApprovalAuditStore,
   InMemoryApprovalAuditStore,
@@ -9,6 +9,8 @@ import {
   MAX_APPROVAL_TTL_SECONDS,
 } from "../src/ci/approval.js";
 import { redactText } from "../src/ci/redaction.js";
+import { isCIResourceAllowed, assertCIResourceAllowed, createCIAllowlist } from "../src/ci/policy.js";
+import { JenkinsProvider } from "../src/providers/jenkins-provider.js";
 
 const BINDING = {
   repo: "owner/repo",
@@ -20,6 +22,18 @@ const BINDING = {
 };
 
 describe("CI approval and redaction controls", () => {
+  it("allows Jenkins multibranch children while denying other repositories and folders", () => {
+    const provider = new JenkinsProvider({ baseUrl: "https://jenkins.example", fetch: vi.fn<typeof globalThis.fetch>() });
+    const policy = createCIAllowlist({ "academytools/planpal-config-6": ["planpalasix-config"] });
+    const matches = provider.matchesWorkflow.bind(provider);
+
+    expect(isCIResourceAllowed(policy, "academytools/planpal-config-6", "planpalasix-config/main", matches)).toBe(true);
+    expect(isCIResourceAllowed(policy, "academytools/planpal-config-6", "planpalasix-config/PR-9", matches)).toBe(true);
+    expect(isCIResourceAllowed(policy, "academytools/other-repo", "planpalasix-config/main", matches)).toBe(false);
+    expect(isCIResourceAllowed(policy, "academytools/planpal-config-6", "unlisted-folder/main", matches)).toBe(false);
+    expect(() => assertCIResourceAllowed(policy, "academytools/planpal-config-6", "unlisted-folder/main", matches)).toThrow("ci_policy_denied");
+  });
+
   it("redacts common secret forms before evidence or audit", () => {
     const syntheticGitHubToken = `ghp_${"x".repeat(32)}`;
     const result = redactText(

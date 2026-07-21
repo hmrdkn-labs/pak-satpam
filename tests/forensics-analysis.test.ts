@@ -30,6 +30,7 @@ function run(conclusion: CIWorkflowRun["conclusion"] = "failure"): CIWorkflowRun
 
 function ciProvider(): CIProvider {
   return {
+    matchesWorkflow: (allowlistEntry, workflow) => workflow === allowlistEntry,
     getWorkflowStatus: vi.fn().mockResolvedValue({
       schemaVersion: "1.0",
       observedAt: NOW.toISOString(),

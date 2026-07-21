@@ -68,6 +68,9 @@ export interface BitbucketProviderOptions {
 /** Read-only Bitbucket Cloud adapter. Bitbucket Data Center is not supported. */
 export class BitbucketProvider implements CIProvider {
   readonly ciProviderType = "bitbucket" as const;
+  matchesWorkflow(allowlistEntry: string, workflow: string): boolean {
+    return workflow === allowlistEntry;
+  }
   readonly #endpoint: CIProviderEndpoint;
   readonly #authorization: string;
   readonly #fetch: typeof globalThis.fetch;

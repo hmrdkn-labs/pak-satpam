@@ -57,6 +57,9 @@ export interface JenkinsProviderOptions {
 /** Read-only Jenkins adapter. The rerun port is deliberately disabled. */
 export class JenkinsProvider implements CIProvider {
   readonly ciProviderType = "jenkins" as const;
+  matchesWorkflow(allowlistEntry: string, workflow: string): boolean {
+    return workflow === allowlistEntry || workflow.startsWith(allowlistEntry + "/");
+  }
   readonly #endpoint: CIProviderEndpoint;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;

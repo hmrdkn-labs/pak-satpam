@@ -44,6 +44,7 @@ export type CIProviderRuntimeType = "github" | "jenkins" | "bitbucket";
 
 export interface CIProviderIdentity {
   readonly ciProviderType?: CIProviderRuntimeType;
+  matchesWorkflow(allowlistEntry: string, workflow: string): boolean;
 }
 
 /** Compatibility shape for existing adapters that expose both ports. */

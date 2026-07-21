@@ -100,6 +100,7 @@ function config(overrides: Partial<ObserverConfig> = {}): ObserverConfig {
 
 function provider(overrides: Partial<ObserverProvider> = {}): ObserverProvider {
   return {
+    matchesWorkflow: (allowlistEntry, workflow) => workflow === allowlistEntry,
     listWorkflowRuns: vi.fn().mockResolvedValue({ runs: [], hasMore: false }),
     getWorkflowStatus: vi.fn(),
     getFailedJobAnalysis: vi.fn().mockResolvedValue({

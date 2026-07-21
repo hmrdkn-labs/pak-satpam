@@ -48,6 +48,9 @@ export interface GitHubActionsProviderOptions {
 
 export class GitHubActionsProvider implements CIProvider {
   readonly ciProviderType = "github" as const;
+  matchesWorkflow(allowlistEntry: string, workflow: string): boolean {
+    return workflow === allowlistEntry;
+  }
   readonly #tokenProvider: CITokenProvider;
   readonly #writeTokenProvider: CITokenProvider | undefined;
   readonly #fetch: typeof globalThis.fetch;

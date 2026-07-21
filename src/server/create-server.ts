@@ -472,7 +472,7 @@ async function rerunFailedWorkflow(ci: CIService, input: CIRerunFailedWorkflowIn
 }
 
 function allowedCIInput(ci: CIService, input: { repo: string; workflow: string }): boolean {
-  try { assertCIResourceAllowed(ci.policy, input.repo, input.workflow); return true; } catch { return false; }
+  try { assertCIResourceAllowed(ci.policy, input.repo, input.workflow, ci.provider.matchesWorkflow.bind(ci.provider)); return true; } catch { return false; }
 }
 
 function ciProviderError(error: unknown): CallToolResult {

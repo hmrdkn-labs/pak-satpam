@@ -38,6 +38,7 @@ function run(id: string, conclusion: CIWorkflowRun["conclusion"] = "failure", up
 function ciProvider(type: CIProviderRuntimeType = "github", conclusion: CIWorkflowRun["conclusion"] = "failure"): CIProvider {
   return {
     ciProviderType: type,
+    matchesWorkflow: (allowlistEntry, workflow) => workflow === allowlistEntry,
     getWorkflowStatus: vi.fn(async (input) => ({
       schemaVersion: "1.0" as const,
       observedAt: NOW.toISOString(),
