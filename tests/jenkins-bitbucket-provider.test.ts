@@ -16,14 +16,14 @@ describe("Jenkins read-only CI adapter", () => {
         displayName: "main",
         actions: [{ lastBuiltRevision: { SHA1: "a".repeat(40) } }],
       })))
-      .mockResolvedValueOnce(new Response("Authorization: Bearer jenkins-secret\ncompile failed\nthird line\n"));
+      .mockResolvedValueOnce(new Response("setup noise\ncompile failed\nAuthorization: Bearer jenkins-secret\nthird line\n"));
     const adapter = new JenkinsProvider({ baseUrl: "https://jenkins.local/jenkins/", branch: "main", fetch, clock: () => NOW });
 
     const status = await adapter.getWorkflowStatus({ repo: "academytools/planpal-backend-learner-6", workflow: "planpal-backend", runId: "42" });
     const logs = await adapter.getLogEvidence({ repo: "academytools/planpal-backend-learner-6", workflow: "planpal-backend", runId: "42", jobId: "42", maxLines: 2 });
 
     expect(status.data.run).toMatchObject({ id: "42", conclusion: "failure", ref: "main", sha: "a".repeat(40) });
-    expect(logs.data.lines).toEqual([{ sequence: 1, text: "[REDACTED]" }, { sequence: 2, text: "compile failed" }]);
+    expect(logs.data.lines).toEqual([{ sequence: 1, text: "[REDACTED]" }, { sequence: 2, text: "third line" }]);
     expect(logs.redactionsApplied).toBe(true);
     expect(logs.truncated).toBe(true);
     expect(fetch.mock.calls.map(([url, init]) => [String(url), init?.method])).toEqual([
@@ -32,6 +32,24 @@ describe("Jenkins read-only CI adapter", () => {
     ]);
     await expect(adapter.rerunFailedWorkflow({ repo: "academytools/planpal-backend-learner-6", workflow: "planpal-backend", runId: "42" })).rejects.toMatchObject({ code: "permission" });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the tail of oversized console logs instead of malformed", async () => {
+    const consoleBody = `${Array.from({ length: 300_000 }, (_, index) => `line ${index}\n`).join("")}FATAL: boom\n`;
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(consoleBody));
+    const adapter = new JenkinsProvider({ baseUrl: "https://jenkins.local/", fetch, clock: () => NOW });
+
+    const logs = await adapter.getLogEvidence({
+      repo: "academytools/planpal-config-6",
+      workflow: "planpalasix-config/PR-240",
+      runId: "1",
+      jobId: "1",
+      maxLines: 5,
+    });
+
+    expect(logs.data.available).toBe(true);
+    expect(logs.truncated).toBe(true);
+    expect(logs.data.lines.at(-1)?.text).toBe("FATAL: boom");
   });
 
   it("uses Jenkins Basic API-token auth without exposing the token and rejects unsafe job paths", async () => {

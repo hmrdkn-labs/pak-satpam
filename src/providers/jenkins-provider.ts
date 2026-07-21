@@ -106,9 +106,13 @@ export class JenkinsProvider implements CIProvider {
   async getLogEvidence(input: CILogEvidenceInput): Promise<CILogEvidenceResult> {
     const response = await this.request(buildPath(input.workflow, this.#branch, input.runId, "consoleText"));
     if (!response.ok) throw httpError(response.status);
-    const raw = await boundedText(response);
-    const rawLines = raw.split(/\r?\n/).filter((line) => line.length > 0);
-    const selected = rawLines.slice(0, Math.min(input.maxLines, 200)).map((line, index) => ({ sequence: index + 1, ...redactText(line) }));
+    const { text: rawText, truncated: bytesTruncated } = await boundedText(response);
+    const rawLines = rawText.split(/\r?\n/).filter((line) => line.length > 0);
+    const linesBeforeSelect = bytesTruncated && rawLines.length > 0 ? rawLines.slice(1) : rawLines;
+    const lineCountBeforeSelect = linesBeforeSelect.length;
+    const selected = linesBeforeSelect
+      .slice(Math.max(0, lineCountBeforeSelect - Math.min(input.maxLines, 200)))
+      .map((line, index) => ({ sequence: index + 1, ...redactText(line) }));
     const lines = selected.map(({ sequence, text }) => ({ sequence, text }));
     return CILogEvidenceResultSchema.parse(makeCIEvidence(this.#providerName, this.#clock(), {
       runId: input.runId,
@@ -118,7 +122,7 @@ export class JenkinsProvider implements CIProvider {
       lines,
       sha256: createHash("sha256").update(lines.map((line) => line.text).join("\n")).digest("hex"),
     }, {
-      truncated: rawLines.length > selected.length || selected.some((line) => line.truncated),
+      truncated: bytesTruncated || lineCountBeforeSelect > selected.length || selected.some((line) => line.truncated),
       redactionsApplied: selected.some((line) => line.redactionsApplied),
     }));
   }
@@ -210,10 +214,10 @@ function parseJson(response: Response): Promise<JsonRecord> {
     : Promise.reject(httpError(response.status));
 }
 
-async function boundedText(response: Response): Promise<string> {
+async function boundedText(response: Response): Promise<{ text: string; truncated: boolean }> {
   const text = await response.text();
-  if (text.length > MAX_RESPONSE_BYTES) throw new CIProviderError("malformed");
-  return text;
+  if (text.length > MAX_RESPONSE_BYTES) return { text: text.slice(text.length - MAX_RESPONSE_BYTES), truncated: true };
+  return { text, truncated: false };
 }
 
 function normalizeBuild(raw: JsonRecord, repository: string, workflow: string, requestedRunId?: string): CIWorkflowRun {
